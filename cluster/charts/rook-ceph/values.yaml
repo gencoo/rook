@@ -54,10 +54,10 @@ pspEnable: true
 ## needed
 csi:
   enableRbdDriver: true
-  enableCephfsDriver: true
+  enableCephfsDriver: false
   enableGrpcMetrics: false
   # set to false to disable deployment of snapshotter container in CephFS provisioner pod.
-  enableCephfsSnapshotter: true
+  enableCephfsSnapshotter: false
   # set to false to disable deployment of snapshotter container in RBD provisioner pod.
   enableRBDSnapshotter: true
   # (Optional) set user created priorityclassName for csi plugin pods.

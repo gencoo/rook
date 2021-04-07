@@ -24,7 +24,7 @@ metadata:
 data:
   # Enable the CSI driver.
   # To run the non-default version of the CSI driver, see the override-able image properties in operator.yaml
-  ROOK_CSI_ENABLE_CEPHFS: "true"
+  ROOK_CSI_ENABLE_CEPHFS: "false"
   # Enable the default version of the CSI RBD driver. To start another version of the CSI driver, see image properties below.
   ROOK_CSI_ENABLE_RBD: "true"
   ROOK_CSI_ENABLE_GRPC_METRICS: "false"
@@ -40,7 +40,7 @@ data:
   # CSI_ENABLE_OMAP_GENERATOR: "false"
 
   # set to false to disable deployment of snapshotter container in CephFS provisioner pod.
-  CSI_ENABLE_CEPHFS_SNAPSHOTTER: "true"
+  CSI_ENABLE_CEPHFS_SNAPSHOTTER: "false"
 
   # set to false to disable deployment of snapshotter container in RBD provisioner pod.
   CSI_ENABLE_RBD_SNAPSHOTTER: "true"
@@ -49,7 +49,7 @@ data:
   # If you disable the kernel client, your application may be disrupted during upgrade.
   # See the upgrade guide: https://rook.io/docs/rook/master/ceph-upgrade.html
   # NOTE! cephfs quota is not supported in kernel version < 4.17
-  CSI_FORCE_CEPHFS_KERNEL_CLIENT: "true"
+  CSI_FORCE_CEPHFS_KERNEL_CLIENT: "false"
 
   # (Optional) policy for modifying a volume's ownership or permissions when the RBD PVC is being mounted.
   # supported values are documented at https://kubernetes-csi.github.io/docs/support-fsgroup.html
