@@ -64,10 +64,19 @@ do.build: generate-csv-ceph-templates
 		-t $(CEPH_IMAGE) \
 		$(TEMP)
 	@rm -fr $(TEMP)
+	@$(MAKE) -C ../.. crds # revert changes made to the crds.yaml file during the csv-gen sequence
 
 generate-csv-ceph-templates: $(OPERATOR_SDK) $(YQ)
 	@if [ ! "$(INCLUDE_CSV_TEMPLATES)" = "" ]; then\
-		$(MAKE) -C ../.. crds;\
+		BEFORE_GEN_CRD_SIZE=$$(wc -l < ../../cluster/examples/kubernetes/ceph/crds.yaml);\
+		$(MAKE) -C ../.. NO_OB_OBC_VOL_GEN=true MAX_DESC_LEN=0 crds;\
+		AFTER_GEN_CRD_SIZE=$$(wc -l < ../../cluster/examples/kubernetes/ceph/crds.yaml);\
+		if [ "$$BEFORE_GEN_CRD_SIZE" -le "$$AFTER_GEN_CRD_SIZE" ]; then\
+			echo "the new crd file must be smaller since the description fields were stripped!";\
+			echo "length before $$BEFORE_GEN_CRD_SIZE";\
+			echo "length after $$AFTER_GEN_CRD_SIZE";\
+			exit 1;\
+		fi;\
 		OPERATOR_SDK=$(OPERATOR_SDK) YQ_TOOL=$(YQ) ../../cluster/olm/ceph/generate-rook-csv-templates.sh;\
 	fi
 
