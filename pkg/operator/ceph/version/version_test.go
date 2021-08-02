@@ -26,7 +26,7 @@ import (
 func TestToString(t *testing.T) {
 	assert.Equal(t, "14.0.0-0 nautilus", Nautilus.String())
 	assert.Equal(t, "15.0.0-0 octopus", Octopus.String())
-	received := CephVersion{-1, 0, 0, 0}
+	received := CephVersion{-1, 0, 0, 0, ""}
 
 	expected := fmt.Sprintf("-1.0.0-0 %s", unknownVersionString)
 	assert.Equal(t, expected, received.String())
@@ -40,37 +40,37 @@ func TestCephVersionFormatted(t *testing.T) {
 func TestReleaseName(t *testing.T) {
 	assert.Equal(t, "nautilus", Nautilus.ReleaseName())
 	assert.Equal(t, "octopus", Octopus.ReleaseName())
-	ver := CephVersion{-1, 0, 0, 0}
+	ver := CephVersion{-1, 0, 0, 0, ""}
 	assert.Equal(t, unknownVersionString, ver.ReleaseName())
 }
 
-func extractVersionHelper(t *testing.T, text string, major, minor, extra, build int) {
+func extractVersionHelper(t *testing.T, text string, major, minor, extra, build int, commitID string) {
 	v, err := ExtractCephVersion(text)
 	if assert.NoError(t, err) {
-		assert.Equal(t, *v, CephVersion{major, minor, extra, build})
+		assert.Equal(t, *v, CephVersion{major, minor, extra, build, commitID})
 	}
 }
 
 func TestExtractVersion(t *testing.T) {
 	// release build
-	v0c := "ceph version 13.2.6 (ae699615bac534ea496ee965ac6192cb7e0e07c1) mimic (stable)"
+	v0c := "ceph version 16.2.6 (ae699615bac534ea496ee965ac6192cb7e0e07c1) pacific (stable)"
 	v0d := `
 root@7a97f5a78bc6:/# ceph --version
-ceph version 13.2.6 (ae699615bac534ea496ee965ac6192cb7e0e07c1) mimic (stable)
+ceph version 16.2.6 (ae699615bac534ea496ee965ac6192cb7e0e07c1) pacific (stable)
 `
-	extractVersionHelper(t, v0c, 13, 2, 6, 0)
-	extractVersionHelper(t, v0d, 13, 2, 6, 0)
+	extractVersionHelper(t, v0c, 16, 2, 6, 0, "ae699615bac534ea496ee965ac6192cb7e0e07c1")
+	extractVersionHelper(t, v0d, 16, 2, 6, 0, "ae699615bac534ea496ee965ac6192cb7e0e07c1")
 
 	// development build
-	v1c := "ceph version 14.1.33-403-g7ba6bece41"
+	v1c := "ceph version 16.1.33-403-g7ba6bece41 (7ba6bece4187eda5d05a9b84211fe6ba8dd287bd) pacific (rc)"
 	v1d := `
 bin/ceph --version
 *** DEVELOPER MODE: setting PATH, PYTHONPATH and LD_LIBRARY_PATH ***
-ceph version 14.1.33-403-g7ba6bece41
+ceph version 16.1.33-403-g7ba6bece41
 (7ba6bece4187eda5d05a9b84211fe6ba8dd287bd) nautilus (rc)
 `
-	extractVersionHelper(t, v1c, 14, 1, 33, 403)
-	extractVersionHelper(t, v1d, 14, 1, 33, 403)
+	extractVersionHelper(t, v1c, 16, 1, 33, 403, "7ba6bece4187eda5d05a9b84211fe6ba8dd287bd")
+	extractVersionHelper(t, v1d, 16, 1, 33, 403, "7ba6bece4187eda5d05a9b84211fe6ba8dd287bd")
 
 	// build without git version info. it is possible to build the ceph tree
 	// without a version number, but none of the container builds do this.
@@ -78,7 +78,7 @@ ceph version 14.1.33-403-g7ba6bece41
 	// explicitly adding fine-grained versioning to avoid issues with
 	// release granularity. adding the reverse name-to-version is easy
 	// enough if this ever becomes a need.
-	v2c := "ceph version Development (no_version) nautilus (rc)"
+	v2c := "ceph version Development (no_version) pacific (rc)"
 	v2d := `
 bin/ceph --version
 *** DEVELOPER MODE: setting PATH, PYTHONPATH and LD_LIBRARY_PATH ***
@@ -91,6 +91,13 @@ ceph version Development (no_version) nautilus (rc)
 	v, err = ExtractCephVersion(v2d)
 	assert.Error(t, err)
 	assert.Nil(t, v)
+
+	// Test the round trip for serializing and deserializing the version
+	v3c := "ceph version 16.2.5-1 pacific"
+	v, err = ExtractCephVersion(v3c)
+	assert.NoError(t, err)
+	assert.NotNil(t, v)
+	assert.Equal(t, "16.2.5-1 pacific", v.String())
 }
 
 func TestSupported(t *testing.T) {
@@ -129,13 +136,13 @@ func TestVersionAtLeast(t *testing.T) {
 	assert.True(t, Octopus.IsAtLeast(Nautilus))
 	assert.True(t, Octopus.IsAtLeast(Octopus))
 
-	assert.True(t, (&CephVersion{1, 0, 0, 0}).IsAtLeast(CephVersion{0, 0, 0, 0}))
-	assert.False(t, (&CephVersion{0, 0, 0, 0}).IsAtLeast(CephVersion{1, 0, 0, 0}))
-	assert.True(t, (&CephVersion{1, 1, 0, 0}).IsAtLeast(CephVersion{1, 0, 0, 0}))
-	assert.False(t, (&CephVersion{1, 0, 0, 0}).IsAtLeast(CephVersion{1, 1, 0, 0}))
-	assert.True(t, (&CephVersion{1, 1, 1, 0}).IsAtLeast(CephVersion{1, 1, 0, 0}))
-	assert.False(t, (&CephVersion{1, 1, 0, 0}).IsAtLeast(CephVersion{1, 1, 1, 0}))
-	assert.True(t, (&CephVersion{1, 1, 1, 0}).IsAtLeast(CephVersion{1, 1, 1, 0}))
+	assert.True(t, (&CephVersion{1, 0, 0, 0, ""}).IsAtLeast(CephVersion{0, 0, 0, 0, ""}))
+	assert.False(t, (&CephVersion{0, 0, 0, 0, ""}).IsAtLeast(CephVersion{1, 0, 0, 0, ""}))
+	assert.True(t, (&CephVersion{1, 1, 0, 0, ""}).IsAtLeast(CephVersion{1, 0, 0, 0, ""}))
+	assert.False(t, (&CephVersion{1, 0, 0, 0, ""}).IsAtLeast(CephVersion{1, 1, 0, 0, ""}))
+	assert.True(t, (&CephVersion{1, 1, 1, 0, ""}).IsAtLeast(CephVersion{1, 1, 0, 0, ""}))
+	assert.False(t, (&CephVersion{1, 1, 0, 0, ""}).IsAtLeast(CephVersion{1, 1, 1, 0, ""}))
+	assert.True(t, (&CephVersion{1, 1, 1, 0, ""}).IsAtLeast(CephVersion{1, 1, 1, 0, ""}))
 }
 
 func TestVersionAtLeastX(t *testing.T) {
@@ -148,26 +155,26 @@ func TestVersionAtLeastX(t *testing.T) {
 }
 
 func TestIsIdentical(t *testing.T) {
-	assert.True(t, IsIdentical(CephVersion{14, 2, 2, 0}, CephVersion{14, 2, 2, 0}))
-	assert.False(t, IsIdentical(CephVersion{14, 2, 2, 0}, CephVersion{15, 2, 2, 0}))
+	assert.True(t, IsIdentical(CephVersion{14, 2, 2, 0, ""}, CephVersion{14, 2, 2, 0, ""}))
+	assert.False(t, IsIdentical(CephVersion{14, 2, 2, 0, ""}, CephVersion{15, 2, 2, 0, ""}))
 }
 
 func TestIsSuperior(t *testing.T) {
-	assert.False(t, IsSuperior(CephVersion{14, 2, 2, 0}, CephVersion{14, 2, 2, 0}))
-	assert.False(t, IsSuperior(CephVersion{14, 2, 2, 0}, CephVersion{15, 2, 2, 0}))
-	assert.True(t, IsSuperior(CephVersion{15, 2, 2, 0}, CephVersion{14, 2, 2, 0}))
-	assert.True(t, IsSuperior(CephVersion{15, 2, 2, 0}, CephVersion{15, 1, 3, 0}))
-	assert.True(t, IsSuperior(CephVersion{15, 2, 2, 0}, CephVersion{15, 2, 1, 0}))
-	assert.True(t, IsSuperior(CephVersion{15, 2, 2, 1}, CephVersion{15, 2, 1, 0}))
+	assert.False(t, IsSuperior(CephVersion{14, 2, 2, 0, ""}, CephVersion{14, 2, 2, 0, ""}))
+	assert.False(t, IsSuperior(CephVersion{14, 2, 2, 0, ""}, CephVersion{15, 2, 2, 0, ""}))
+	assert.True(t, IsSuperior(CephVersion{15, 2, 2, 0, ""}, CephVersion{14, 2, 2, 0, ""}))
+	assert.True(t, IsSuperior(CephVersion{15, 2, 2, 0, ""}, CephVersion{15, 1, 3, 0, ""}))
+	assert.True(t, IsSuperior(CephVersion{15, 2, 2, 0, ""}, CephVersion{15, 2, 1, 0, ""}))
+	assert.True(t, IsSuperior(CephVersion{15, 2, 2, 1, ""}, CephVersion{15, 2, 1, 0, ""}))
 }
 
 func TestIsInferior(t *testing.T) {
-	assert.False(t, IsInferior(CephVersion{14, 2, 2, 0}, CephVersion{14, 2, 2, 0}))
-	assert.False(t, IsInferior(CephVersion{15, 2, 2, 0}, CephVersion{14, 2, 2, 0}))
-	assert.True(t, IsInferior(CephVersion{14, 2, 2, 0}, CephVersion{15, 2, 2, 0}))
-	assert.True(t, IsInferior(CephVersion{15, 1, 3, 0}, CephVersion{15, 2, 2, 0}))
-	assert.True(t, IsInferior(CephVersion{15, 2, 1, 0}, CephVersion{15, 2, 2, 0}))
-	assert.True(t, IsInferior(CephVersion{15, 2, 1, 0}, CephVersion{15, 2, 2, 1}))
+	assert.False(t, IsInferior(CephVersion{14, 2, 2, 0, ""}, CephVersion{14, 2, 2, 0, ""}))
+	assert.False(t, IsInferior(CephVersion{15, 2, 2, 0, ""}, CephVersion{14, 2, 2, 0, ""}))
+	assert.True(t, IsInferior(CephVersion{14, 2, 2, 0, ""}, CephVersion{15, 2, 2, 0, ""}))
+	assert.True(t, IsInferior(CephVersion{15, 1, 3, 0, ""}, CephVersion{15, 2, 2, 0, ""}))
+	assert.True(t, IsInferior(CephVersion{15, 2, 1, 0, ""}, CephVersion{15, 2, 2, 0, ""}))
+	assert.True(t, IsInferior(CephVersion{15, 2, 1, 0, ""}, CephVersion{15, 2, 2, 1, ""}))
 }
 
 func TestValidateCephVersionsBetweenLocalAndExternalClusters(t *testing.T) {

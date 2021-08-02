@@ -29,6 +29,8 @@ const (
 	EncryptedDeviceKey = "encryptedDevice"
 	MetadataDeviceKey  = "metadataDevice"
 	DeviceClassKey     = "deviceClass"
+	InitialWeightKey   = "initialWeight"
+	PrimaryAffinityKey = "primaryAffinity"
 )
 
 // StoreConfig represents the configuration of an OSD on a device.
@@ -39,6 +41,8 @@ type StoreConfig struct {
 	EncryptedDevice bool   `json:"encryptedDevice,omitempty"`
 	MetadataDevice  string `json:"metadataDevice,omitempty"`
 	DeviceClass     string `json:"deviceClass,omitempty"`
+	InitialWeight   string `json:"initialWeight,omitempty"`
+	PrimaryAffinity string `json:"primaryAffinity,omitempty"`
 }
 
 // NewStoreConfig returns a StoreConfig with proper defaults set.
@@ -68,6 +72,10 @@ func ToStoreConfig(config map[string]string) StoreConfig {
 			storeConfig.MetadataDevice = v
 		case DeviceClassKey:
 			storeConfig.DeviceClass = v
+		case InitialWeightKey:
+			storeConfig.InitialWeight = v
+		case PrimaryAffinityKey:
+			storeConfig.PrimaryAffinity = v
 		}
 	}
 

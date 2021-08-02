@@ -19,6 +19,7 @@ package rook
 import (
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 
 	"github.com/coreos/pkg/capnslog"
@@ -33,8 +34,10 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/tevino/abool"
+	v1 "k8s.io/api/core/v1"
 	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	"k8s.io/apimachinery/pkg/util/uuid"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -151,6 +154,14 @@ func NewContext() *clusterd.Context {
 	context.Clientset, err = kubernetes.NewForConfig(context.KubeConfig)
 	TerminateOnError(err, "failed to create k8s clientset")
 
+	context.RemoteExecutor.ClientSet = context.Clientset
+	context.RemoteExecutor.RestClient = context.KubeConfig
+
+	// Dynamic clientset allows dealing with resources that aren't statically typed but determined
+	// at runtime.
+	context.DynamicClientset, err = dynamic.NewForConfig(context.KubeConfig)
+	TerminateOnError(err, "failed to create dynamic clientset")
+
 	context.APIExtensionClientset, err = apiextensionsclient.NewForConfig(context.KubeConfig)
 	TerminateOnError(err, "failed to create k8s API extension clientset")
 
@@ -195,6 +206,17 @@ func GetOperatorServiceAccount(clientset kubernetes.Interface) string {
 	TerminateOnError(err, "failed to get pod")
 
 	return pod.Spec.ServiceAccountName
+}
+
+func CheckOperatorResources(clientset kubernetes.Interface) {
+	// Getting the info of the operator pod
+	pod, err := k8sutil.GetRunningPod(clientset)
+	TerminateOnError(err, "failed to get pod")
+	resource := pod.Spec.Containers[0].Resources
+	// set env var if operator pod resources are set
+	if !reflect.DeepEqual(resource, (v1.ResourceRequirements{})) {
+		os.Setenv("OPERATOR_RESOURCES_SPECIFIED", "true")
+	}
 }
 
 // TerminateOnError terminates if err is not nil

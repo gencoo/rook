@@ -32,19 +32,40 @@ kubectl delete -f csi/cephfs/kube-registry.yaml
 kubectl delete storageclass csi-cephfs
 ```
 
+After those block and file resources have been cleaned up, you can then delete your Rook cluster. This is important to delete **before removing the Rook operator and agent or else resources may not be cleaned up properly**.
+
 ## Delete the CephCluster CRD
 
-After those block and file resources have been cleaned up, you can then delete your Rook cluster. This is important to delete **before removing the Rook operator and agent or else resources may not be cleaned up properly**.
+Edit the `CephCluster` and add the `cleanupPolicy`
+
+WARNING: DATA WILL BE PERMANENTLY DELETED AFTER DELETING THE `CephCluster` CR WITH `cleanupPolicy`.
+
+```console
+kubectl -n rook-ceph patch cephcluster rook-ceph --type merge -p '{"spec":{"cleanupPolicy":{"confirmation":"yes-really-destroy-data"}}}'
+```
+
+Once the cleanup policy is enabled, any new configuration changes in the CephCluster will be blocked. Nothing will happen until the deletion of the CR is requested, so this `cleanupPolicy` change can still be reverted if needed.
+
+Checkout more details about the `cleanupPolicy` [here](ceph-cluster-crd.md#cleanup-policy)
+
+Delete the `CephCluster` CR.
 
 ```console
 kubectl -n rook-ceph delete cephcluster rook-ceph
 ```
 
-Verify that the cluster CRD has been deleted before continuing to the next step.
+Verify that the cluster CR has been deleted before continuing to the next step.
 
 ```console
 kubectl -n rook-ceph get cephcluster
 ```
+
+If the `cleanupPolicy` was applied, then wait for the `rook-ceph-cleanup` jobs to be completed on all the nodes.
+These jobs will perform the following operations:
+- Delete the directory `/var/lib/rook` (or the path specified by the `dataDirHostPath`) on all the nodes
+- Wipe the data on the drives on all the nodes where OSDs were running in this cluster
+
+Note: The cleanup jobs might not start if the resources created on top of Rook Cluster are not deleted completely. [See](ceph-teardown.md#delete-the-block-and-file-artifacts)
 
 ## Delete the Operator and related Resources
 
@@ -56,6 +77,8 @@ kubectl delete -f operator.yaml
 kubectl delete -f common.yaml
 kubectl delete -f crds.yaml
 ```
+
+If the `cleanupPolicy` was applied and the cleanup jobs have completed on all the nodes, then the cluster tear down has been successful. If you skipped adding the `cleanupPolicy` then follow the manual steps mentioned below to tear down the cluster.
 
 ## Delete the data on hosts
 
@@ -93,6 +116,9 @@ ls /dev/mapper/ceph-* | xargs -I% -- dmsetup remove %
 # ceph-volume setup can leave ceph-<UUID> directories in /dev and /dev/mapper (unnecessary clutter)
 rm -rf /dev/ceph-*
 rm -rf /dev/mapper/ceph--*
+
+# Inform the OS of partition table changes
+partprobe $DISK
 ```
 
 ## Troubleshooting
@@ -127,7 +153,7 @@ If for some reason the operator is not able to remove the finalizer (ie. the ope
 ```console
 for CRD in $(kubectl get crd -n rook-ceph | awk '/ceph.rook.io/ {print $1}'); do
     kubectl get -n rook-ceph "$CRD" -o name | \
-    xargs -I {} kubectl patch {} --type merge -p '{"metadata":{"finalizers": [null]}}'
+    xargs -I {} kubectl patch -n rook-ceph {} --type merge -p '{"metadata":{"finalizers": [null]}}'
 done
 ```
 
@@ -142,3 +168,10 @@ This command will patch the following CRDs on v1.3:
 >```
 
 Within a few seconds you should see that the cluster CRD has been deleted and will no longer block other cleanup such as deleting the `rook-ceph` namespace.
+
+If the namespace is still stuck in Terminating state, you can check which resources are holding up the deletion and remove the finalizers and delete those
+
+```console
+kubectl api-resources --verbs=list --namespaced -o name \
+  | xargs -n 1 kubectl get --show-kind --ignore-not-found -n rook-ceph
+```

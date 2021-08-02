@@ -18,9 +18,10 @@ package object
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
@@ -35,12 +36,35 @@ type S3Agent struct {
 	Client *s3.S3
 }
 
-func NewS3Agent(accessKey, secretKey, endpoint string, debug bool) (*S3Agent, error) {
+func NewS3Agent(accessKey, secretKey, endpoint string, debug bool, tlsCert []byte) (*S3Agent, error) {
+	return newS3Agent(accessKey, secretKey, endpoint, debug, tlsCert, false)
+}
+
+func NewTestOnlyS3Agent(accessKey, secretKey, endpoint string, debug bool) (*S3Agent, error) {
+	return newS3Agent(accessKey, secretKey, endpoint, debug, nil, true)
+}
+
+func newS3Agent(accessKey, secretKey, endpoint string, debug bool, tlsCert []byte, insecure bool) (*S3Agent, error) {
 	const cephRegion = "us-east-1"
 
 	logLevel := aws.LogOff
 	if debug {
 		logLevel = aws.LogDebug
+	}
+	client := http.Client{
+		Timeout: HttpTimeOut,
+	}
+	tlsEnabled := false
+	if len(tlsCert) > 0 || insecure {
+		tlsEnabled = true
+		if len(tlsCert) > 0 {
+			client.Transport = BuildTransportTLS(tlsCert)
+		} else if insecure {
+			client.Transport = &http.Transport{
+				// #nosec G402 is enabled only for testing
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			}
+		}
 	}
 	sess, err := session.NewSession(
 		aws.NewConfig().
@@ -49,10 +73,8 @@ func NewS3Agent(accessKey, secretKey, endpoint string, debug bool) (*S3Agent, er
 			WithEndpoint(endpoint).
 			WithS3ForcePathStyle(true).
 			WithMaxRetries(5).
-			WithDisableSSL(true).
-			WithHTTPClient(&http.Client{
-				Timeout: time.Second * 15,
-			}).
+			WithDisableSSL(!tlsEnabled).
+			WithHTTPClient(&client).
 			WithLogLevel(logLevel),
 	)
 	if err != nil {
@@ -178,4 +200,13 @@ func (s *S3Agent) DeleteObjectInBucket(bucketname string, key string) (bool, err
 
 	}
 	return true, nil
+}
+
+func BuildTransportTLS(tlsCert []byte) *http.Transport {
+	caCertPool := x509.NewCertPool()
+	caCertPool.AppendCertsFromPEM(tlsCert)
+
+	return &http.Transport{
+		TLSClientConfig: &tls.Config{RootCAs: caCertPool, MinVersion: tls.VersionTLS12},
+	}
 }

@@ -91,6 +91,25 @@ rules:
       - update
       - delete
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rook-ceph-system
+  labels:
+    operator: rook
+    storage-backend: ceph
+rules:
+    # Most resources are represented by a string representation of their name, such as “pods”, just as it appears in the URL for the relevant API endpoint.
+    # However, some Kubernetes APIs involve a “subresource”, such as the logs for a pod. [...]
+    # To represent this in an RBAC role, use a slash to delimit the resource and subresource.
+    # https://kubernetes.io/docs/reference/access-authn-authz/rbac/#referring-to-resources
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
 # The role for the operator to manage resources in its own namespace
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -271,6 +290,7 @@ rules:
       - configmaps
       - nodes
       - nodes/proxy
+      - persistentvolumes
     verbs:
       - get
       - list
@@ -284,6 +304,14 @@ rules:
       - patch
       - list
       - get
+      - watch
+  - apiGroups:
+      - storage.k8s.io
+    resources:
+      - storageclasses
+    verbs:
+      - get
+      - list
       - watch
 ---
 kind: ClusterRole
@@ -351,6 +379,22 @@ subjects:
     name: rook-ceph-system
     namespace: rook-ceph # namespace:operator
 ---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: rook-ceph-system
+  labels:
+    operator: rook
+    storage-backend: ceph
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: rook-ceph-system
+subjects:
+  - kind: ServiceAccount
+    name: rook-ceph-system
+    namespace: rook-ceph # namespace:operator
+---
 # Grant the rook system daemons cluster-wide access to manage the Rook CRDs, PVCs, and storage classes
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
@@ -373,17 +417,9 @@ subjects:
 # namespace. If you want to create the cluster in a different namespace, you will need to modify these roles
 # and bindings accordingly.
 #################################################################################################################
-# OLM: BEGIN SERVICEACCOUNT DEFAULT
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: rook-ceph-default
-  namespace: rook-ceph # namespace:cluster
-# OLM: END SERVICEACCOUNT DEFAULT
+# Service account for the Ceph OSDs. Must exist and cannot be renamed.
 # OLM: BEGIN SERVICE ACCOUNT OSD
 ---
-# Service account for the Ceph OSDs. Must exist and cannot be renamed.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -1090,6 +1126,18 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get"]
+  - apiGroups: ["replication.storage.openshift.io"]
+    resources: ["volumereplications", "volumereplicationclasses"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: ["replication.storage.openshift.io"]
+    resources: ["volumereplications/finalizers"]
+    verbs: ["update"]
+  - apiGroups: ["replication.storage.openshift.io"]
+    resources: ["volumereplications/status"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["replication.storage.openshift.io"]
+    resources: ["volumereplicationclasses/status"]
+    verbs: ["get"]
 # OLM: END CSI RBD CLUSTER ROLE
 # OLM: BEGIN CSI RBD CLUSTER ROLEBINDING
 ---
@@ -1146,3 +1194,43 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 # OLM: END CSI RBD CLUSTER ROLEBINDING
 ---
+# Aspects of ceph osd purge job that require access to the operator/cluster namespace
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: rook-ceph-purge-osd
+  namespace: rook-ceph # namespace:operator
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["delete"]
+---
+# Allow the osd purge job to run in this namespace
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: rook-ceph-purge-osd
+  namespace: rook-ceph # namespace:operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: rook-ceph-purge-osd
+subjects:
+  - kind: ServiceAccount
+    name: rook-ceph-purge-osd
+    namespace: rook-ceph # namespace:operator
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rook-ceph-purge-osd
+  namespace: rook-ceph # namespace:operator

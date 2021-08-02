@@ -11,7 +11,9 @@ image:
 crds:
   # Whether the helm chart should create and update the CRDs. If false, the CRDs must be
   # managed independently with cluster/examples/kubernetes/ceph/crds.yaml.
-  # **WARNING** Only set during first deployment. If later disabled the cluster will be destroyed.
+  # **WARNING** Only set during first deployment. If later disabled the cluster may be DESTROYED.
+  # If the CRDs are deleted in this case, see the disaster recovery guide to restore them.
+  # https://rook.github.io/docs/rook/master/ceph-disaster-recovery.html#restoring-crds-after-deletion
   enabled: true
 
 resources:
@@ -20,7 +22,7 @@ resources:
     memory: 256Mi
   requests:
     cpu: 100m
-    memory: 256Mi
+    memory: 128Mi
 
 nodeSelector: {}
 # Constraint rook-ceph-operator Deployment to nodes with label `disktype: ssd`.
@@ -56,6 +58,10 @@ csi:
   enableRbdDriver: true
   enableCephfsDriver: false
   enableGrpcMetrics: false
+  # Set to true to enable host networking for CSI CephFS and RBD nodeplugins. This may be necessary
+  # in some network configurations where the SDN does not provide access to an external cluster or
+  # there is significant drop in read/write performance.
+  # enableCSIHostNetwork: true
   # set to false to disable deployment of snapshotter container in CephFS provisioner pod.
   enableCephfsSnapshotter: false
   # set to false to disable deployment of snapshotter container in RBD provisioner pod.
@@ -264,24 +270,29 @@ csi:
   #rbdLivenessMetricsPort: 9080
   #kubeletDirPath: /var/lib/kubelet
   #cephcsi:
-    #image: quay.io/cephcsi/cephcsi:v3.2.1
+    #image: quay.io/cephcsi/cephcsi:v3.3.1
   #registrar:
-    #image: k8s.gcr.io/sig-storage/csi-node-driver-registrar:v2.0.1
+    #image: k8s.gcr.io/sig-storage/csi-node-driver-registrar:v2.2.0
   #provisioner:
-    #image: k8s.gcr.io/sig-storage/csi-provisioner:v2.0.4
+    #image: k8s.gcr.io/sig-storage/csi-provisioner:v2.2.2
   #snapshotter:
-    #image: k8s.gcr.io/sig-storage/csi-snapshotter:v3.0.2
+    #image: k8s.gcr.io/sig-storage/csi-snapshotter:v4.1.1
   #attacher:
-    #image: k8s.gcr.io/sig-storage/csi-attacher:v3.0.2
+    #image: k8s.gcr.io/sig-storage/csi-attacher:v3.2.1
   #resizer:
-    #image: k8s.gcr.io/sig-storage/csi-resizer:v1.0.1
+    #image: k8s.gcr.io/sig-storage/csi-resizer:v1.2.0
   # Labels to add to the CSI CephFS Deployments and DaemonSets Pods.
   #cephfsPodLabels: "key1=value1,key2=value2"
   # Labels to add to the CSI RBD Deployments and DaemonSets Pods.
   #rbdPodLabels: "key1=value1,key2=value2"
+  # Enable volume replication controller
+  volumeReplication:
+    enabled: false
+    #image: "quay.io/csiaddons/volumereplication-operator:v0.1.0"
 
 enableFlexDriver: false
 enableDiscoveryDaemon: false
+cephCommandsTimeoutSeconds: "15"
 
 # enable the ability to have multiple Ceph filesystems in the same cluster
 # WARNING: Experimental feature in Ceph Releases Octopus (v15) and Nautilus (v14)

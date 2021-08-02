@@ -21,12 +21,14 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/operator/k8sutil"
+	"github.com/rook/rook/pkg/util/exec"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -40,11 +42,21 @@ const (
 	// UninitializedCephConfigError refers to the error message printed by the Ceph CLI when there is no ceph configuration file
 	// This typically is raised when the operator has not finished initializing
 	UninitializedCephConfigError = "error calling conf_read_file"
+
+	// OperatorNotInitializedMessage is the message we print when the Operator is not ready to reconcile, typically the ceph.conf has not been generated yet
+	OperatorNotInitializedMessage = "skipping reconcile since operator is still initializing"
+
+	// CancellingOrchestrationMessage is the message to indicate a reconcile was cancelled
+	CancellingOrchestrationMessage = "CANCELLING CURRENT ORCHESTRATION"
 )
 
 var (
 	// ImmediateRetryResult Return this for a immediate retry of the reconciliation loop with the same request object.
 	ImmediateRetryResult = reconcile.Result{Requeue: true}
+
+	// ImmediateRetryResultNoBackoff Return this for a immediate retry of the reconciliation loop with the same request object.
+	// Override the exponential backoff behavior by setting the RequeueAfter time explicitly.
+	ImmediateRetryResultNoBackoff = reconcile.Result{Requeue: true, RequeueAfter: time.Second}
 
 	// WaitForRequeueIfCephClusterNotReady waits for the CephCluster to be ready
 	WaitForRequeueIfCephClusterNotReady = reconcile.Result{Requeue: true, RequeueAfter: 10 * time.Second}
@@ -71,13 +83,24 @@ func DiscoveryDaemonEnabled(context *clusterd.Context) bool {
 	return value == "true"
 }
 
+// SetCephCommandsTimeout sets the timeout value of Ceph commands which are executed from Rook
+func SetCephCommandsTimeout(context *clusterd.Context) {
+	strTimeoutSeconds, _ := k8sutil.GetOperatorSetting(context.Clientset, OperatorSettingConfigMapName, "ROOK_CEPH_COMMANDS_TIMEOUT_SECONDS", "15")
+	timeoutSeconds, err := strconv.Atoi(strTimeoutSeconds)
+	if err != nil || timeoutSeconds < 1 {
+		logger.Warningf("ROOK_CEPH_COMMANDS_TIMEOUT is %q but it should be >= 1, set the default value 15", strTimeoutSeconds)
+		timeoutSeconds = 15
+	}
+	exec.CephCommandsTimeout = time.Duration(timeoutSeconds) * time.Second
+}
+
 // CheckForCancelledOrchestration checks whether a cancellation has been requested
 func CheckForCancelledOrchestration(context *clusterd.Context) error {
 	defer context.RequestCancelOrchestration.UnSet()
 
 	// Check whether we need to cancel the orchestration
 	if context.RequestCancelOrchestration.IsSet() {
-		return errors.New("CANCELLING CURRENT ORCHESTRATION")
+		return errors.New(CancellingOrchestrationMessage)
 	}
 
 	return nil

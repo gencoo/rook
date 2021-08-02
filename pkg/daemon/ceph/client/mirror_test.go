@@ -45,8 +45,6 @@ func TestCreateRBDMirrorBootstrapPeer(t *testing.T) {
 			assert.Equal(t, "bootstrap", args[3])
 			assert.Equal(t, "create", args[4])
 			assert.Equal(t, pool, args[5])
-			assert.Equal(t, "--site-name", args[6])
-			assert.Equal(t, "4fe04ebb-ec0c-46c2-ac55-9eb52ebbfb82-mycluster", args[7])
 			return bootstrapPeerToken, nil
 		}
 		return "", errors.New("unknown command")
@@ -303,5 +301,44 @@ func TestRemoveSnapshotSchedules(t *testing.T) {
 	context := &clusterd.Context{Executor: executor}
 	poolSpec := &cephv1.PoolSpec{Mirroring: cephv1.MirroringSpec{SnapshotSchedules: []cephv1.SnapshotScheduleSpec{{Interval: interval, StartTime: startTime}}}}
 	err := removeSnapshotSchedules(context, AdminClusterInfo("mycluster"), *poolSpec, pool)
+	assert.NoError(t, err)
+}
+
+func TestDisableMirroring(t *testing.T) {
+	pool := "pool-test"
+	executor := &exectest.MockExecutor{}
+	executor.MockExecuteCommandWithOutput = func(command string, args ...string) (string, error) {
+		if args[0] == "mirror" {
+			assert.Equal(t, "pool", args[1])
+			assert.Equal(t, "disable", args[2])
+			assert.Equal(t, pool, args[3])
+			return "", nil
+		}
+		return "", errors.New("unknown command")
+	}
+	context := &clusterd.Context{Executor: executor}
+
+	err := disablePoolMirroring(context, AdminClusterInfo("mycluster"), pool)
+	assert.NoError(t, err)
+}
+
+func TestRemoveClusterPeer(t *testing.T) {
+	pool := "pool-test"
+	peerUUID := "39ae33fb-1dd6-4f9b-8ed7-0e4517068900"
+	executor := &exectest.MockExecutor{}
+	executor.MockExecuteCommandWithOutput = func(command string, args ...string) (string, error) {
+		if args[0] == "mirror" {
+			assert.Equal(t, "pool", args[1])
+			assert.Equal(t, "peer", args[2])
+			assert.Equal(t, "remove", args[3])
+			assert.Equal(t, pool, args[4])
+			assert.Equal(t, peerUUID, args[5])
+			return "", nil
+		}
+		return "", errors.New("unknown command")
+	}
+	context := &clusterd.Context{Executor: executor}
+
+	err := removeClusterPeer(context, AdminClusterInfo("mycluster"), pool, peerUUID)
 	assert.NoError(t, err)
 }

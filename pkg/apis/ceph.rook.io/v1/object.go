@@ -26,8 +26,23 @@ import (
 // will be registered for the validating webhook.
 var _ webhook.Validator = &CephObjectStore{}
 
+const ServiceServingCertKey = "service.beta.openshift.io/serving-cert-secret-name"
+
 func (s *ObjectStoreSpec) IsMultisite() bool {
 	return s.Zone.Name != ""
+}
+
+func (s *ObjectStoreSpec) IsTLSEnabled() bool {
+	return s.Gateway.SecurePort != 0 && (s.Gateway.SSLCertificateRef != "" || s.GetServiceServingCert() != "")
+}
+
+func (s *ObjectStoreSpec) GetPort() (int32, error) {
+	if s.IsTLSEnabled() {
+		return s.Gateway.SecurePort, nil
+	} else if s.Gateway.Port != 0 {
+		return s.Gateway.Port, nil
+	}
+	return -1, errors.New("At least one of Port or SecurePort should be non-zero")
 }
 
 func (s *ObjectStoreSpec) IsExternal() bool {
@@ -75,4 +90,15 @@ func (o *CephObjectStore) ValidateUpdate(old runtime.Object) error {
 
 func (o *CephObjectStore) ValidateDelete() error {
 	return nil
+}
+
+func (s *ObjectStoreSpec) GetServiceServingCert() string {
+	if s.Gateway.Service != nil {
+		return s.Gateway.Service.Annotations[ServiceServingCertKey]
+	}
+	return ""
+}
+
+func (c *CephObjectStore) GetStatusConditions() *[]Condition {
+	return &c.Status.Conditions
 }

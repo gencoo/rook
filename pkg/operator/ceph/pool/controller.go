@@ -32,6 +32,7 @@ import (
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mgr"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
 	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
+	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -109,6 +110,19 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 		return err
 	}
 
+	// Build Handler function to return the list of ceph block pool
+	// This is used by the watchers below
+	handlerFunc, err := opcontroller.ObjectToCRMapper(mgr.GetClient(), &cephv1.CephBlockPoolList{}, mgr.GetScheme())
+	if err != nil {
+		return err
+	}
+
+	// Watch for ConfigMap "rook-ceph-mon-endpoints" update and reconcile, which will reconcile update the bootstrap peer token
+	err = c.Watch(&source.Kind{Type: &corev1.ConfigMap{TypeMeta: metav1.TypeMeta{Kind: "ConfigMap", APIVersion: corev1.SchemeGroupVersion.String()}}}, handler.EnqueueRequestsFromMapFunc(handlerFunc), mon.PredicateMonEndpointChanges())
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -179,11 +193,12 @@ func (r *ReconcileCephBlockPool) reconcile(request reconcile.Request) (reconcile
 	}
 	r.clusterInfo = clusterInfo
 
-	// Initialize the channel for this object store
+	// Initialize the channel for this pool
 	// This allows us to track multiple CephBlockPool in the same namespace
-	_, poolChannelExists := r.blockPoolChannels[cephBlockPool.Name]
+	blockPoolChannelKey := fmt.Sprintf("%s-%s", cephBlockPool.Namespace, cephBlockPool.Name)
+	_, poolChannelExists := r.blockPoolChannels[blockPoolChannelKey]
 	if !poolChannelExists {
-		r.blockPoolChannels[cephBlockPool.Name] = &blockPoolHealth{
+		r.blockPoolChannels[blockPoolChannelKey] = &blockPoolHealth{
 			stopChan:          make(chan struct{}),
 			monitoringRunning: false,
 		}
@@ -191,6 +206,11 @@ func (r *ReconcileCephBlockPool) reconcile(request reconcile.Request) (reconcile
 
 	// DELETE: the CR was deleted
 	if !cephBlockPool.GetDeletionTimestamp().IsZero() {
+		// If the ceph block pool is still in the map, we must remove it during CR deletion
+		// We must remove it first otherwise the checker will panic since the status/info will be nil
+		if poolChannelExists {
+			r.cancelMirrorMonitoring(blockPoolChannelKey)
+		}
 
 		logger.Infof("deleting pool %q", cephBlockPool.Name)
 		err := deletePool(r.context, clusterInfo, cephBlockPool)
@@ -201,15 +221,6 @@ func (r *ReconcileCephBlockPool) reconcile(request reconcile.Request) (reconcile
 		// disable RBD stats collection if cephBlockPool was deleted
 		if err := configureRBDStats(r.context, clusterInfo); err != nil {
 			logger.Errorf("failed to disable stats collection for pool(s). %v", err)
-		}
-
-		// If the ceph block pool is still in the map, we must remove it during CR deletion
-		if poolChannelExists {
-			// Close the channel to stop the mirroring status
-			close(r.blockPoolChannels[cephBlockPool.Name].stopChan)
-
-			// Remove ceph block pool from the map
-			delete(r.blockPoolChannels, cephBlockPool.Name)
 		}
 
 		// Remove finalizer
@@ -224,6 +235,10 @@ func (r *ReconcileCephBlockPool) reconcile(request reconcile.Request) (reconcile
 
 	// validate the pool settings
 	if err := ValidatePool(r.context, clusterInfo, &cephCluster.Spec, cephBlockPool); err != nil {
+		if strings.Contains(err.Error(), opcontroller.UninitializedCephConfigError) {
+			logger.Info(opcontroller.OperatorNotInitializedMessage)
+			return opcontroller.WaitForRequeueIfOperatorNotInitialized, nil
+		}
 		return opcontroller.ImmediateRetryResult, errors.Wrapf(err, "invalid pool CR %q spec", cephBlockPool.Name)
 	}
 
@@ -249,6 +264,10 @@ func (r *ReconcileCephBlockPool) reconcile(request reconcile.Request) (reconcile
 	// CREATE/UPDATE
 	reconcileResponse, err = r.reconcileCreatePool(clusterInfo, &cephCluster.Spec, cephBlockPool)
 	if err != nil {
+		if strings.Contains(err.Error(), opcontroller.UninitializedCephConfigError) {
+			logger.Info(opcontroller.OperatorNotInitializedMessage)
+			return opcontroller.WaitForRequeueIfOperatorNotInitialized, nil
+		}
 		updateStatus(r.client, request.NamespacedName, cephv1.ConditionFailure, nil)
 		return reconcileResponse, errors.Wrapf(err, "failed to create pool %q.", cephBlockPool.GetName())
 	}
@@ -258,11 +277,12 @@ func (r *ReconcileCephBlockPool) reconcile(request reconcile.Request) (reconcile
 		return reconcile.Result{}, errors.Wrap(err, "failed to enable/disable stats collection for pool(s)")
 	}
 
+	checker := newMirrorChecker(r.context, r.client, r.clusterInfo, request.NamespacedName, &cephBlockPool.Spec, cephBlockPool.Name)
 	// ADD PEERS
 	logger.Debug("reconciling create rbd mirror peer configuration")
 	if cephBlockPool.Spec.Mirroring.Enabled {
 		// Always create a bootstrap peer token in case another cluster wants to add us as a peer
-		reconcileResponse, err = r.createBootstrapPeerSecret(cephBlockPool, request.NamespacedName)
+		reconcileResponse, err = opcontroller.CreateBootstrapPeerSecret(r.context, clusterInfo, cephBlockPool, request.NamespacedName, r.scheme)
 		if err != nil {
 			updateStatus(r.client, request.NamespacedName, cephv1.ConditionFailure, nil)
 			return reconcileResponse, errors.Wrapf(err, "failed to create rbd-mirror bootstrap peer for pool %q.", cephBlockPool.GetName())
@@ -272,22 +292,36 @@ func (r *ReconcileCephBlockPool) reconcile(request reconcile.Request) (reconcile
 		logger.Debug("listing rbd-mirror CR")
 		// Run the goroutine to update the mirroring status
 		if !cephBlockPool.Spec.StatusCheck.Mirror.Disabled {
-			// Start monitoring object store
-			if r.blockPoolChannels[cephBlockPool.Name].monitoringRunning {
-				logger.Debug("external rgw endpoint monitoring go routine already running!")
+			// Start monitoring of the pool
+			if r.blockPoolChannels[blockPoolChannelKey].monitoringRunning {
+				logger.Debug("pool monitoring go routine already running!")
 			} else {
-				checker := newMirrorChecker(r.context, r.client, r.clusterInfo, request.NamespacedName, &cephBlockPool.Spec, cephBlockPool.Name)
-				go checker.checkMirroring(r.blockPoolChannels[cephBlockPool.Name].stopChan)
+				r.blockPoolChannels[blockPoolChannelKey].monitoringRunning = true
+				go checker.checkMirroring(r.blockPoolChannels[blockPoolChannelKey].stopChan)
 			}
 		}
 
+		// Add bootstrap peer if any
+		logger.Debug("reconciling ceph bootstrap peers import")
+		reconcileResponse, err = r.reconcileAddBoostrapPeer(cephBlockPool, request.NamespacedName)
+		if err != nil {
+			return reconcileResponse, errors.Wrap(err, "failed to add ceph rbd mirror peer")
+		}
+
 		// Set Ready status, we are done reconciling
-		updateStatus(r.client, request.NamespacedName, cephv1.ConditionReady, generateStatusInfo(cephBlockPool))
+		updateStatus(r.client, request.NamespacedName, cephv1.ConditionReady, opcontroller.GenerateStatusInfo(cephBlockPool))
 
 		// If not mirrored there is no Status Info field to fulfil
 	} else {
 		// Set Ready status, we are done reconciling
 		updateStatus(r.client, request.NamespacedName, cephv1.ConditionReady, nil)
+
+		// Stop monitoring the mirroring status of this pool
+		if poolChannelExists && r.blockPoolChannels[blockPoolChannelKey].monitoringRunning {
+			r.cancelMirrorMonitoring(blockPoolChannelKey)
+			// Reset the MirrorHealthCheckSpec
+			checker.updateStatusMirroring(nil, nil, nil, "")
+		}
 	}
 
 	// Return and do not requeue
@@ -352,10 +386,18 @@ func configureRBDStats(clusterContext *clusterd.Context, clusterInfo *cephclient
 		}
 	}
 	logger.Debugf("RBD per-image IO statistics will be collected for pools: %v", enableStatsForPools)
-	_, err = cephclient.MgrSetConfig(clusterContext, clusterInfo, "", "mgr/prometheus/rbd_stats_pools", strings.Join(enableStatsForPools, ","), false)
+	_, err = cephclient.SetConfig(clusterContext, clusterInfo, "mgr.", "mgr/prometheus/rbd_stats_pools", strings.Join(enableStatsForPools, ","), false)
 	if err != nil {
 		return errors.Wrapf(err, "failed to enable rbd_stats_pools")
 	}
 	logger.Debug("configured RBD per-image IO statistics collection")
 	return nil
+}
+
+func (r *ReconcileCephBlockPool) cancelMirrorMonitoring(cephBlockPoolName string) {
+	// Close the channel to stop the mirroring status
+	close(r.blockPoolChannels[cephBlockPoolName].stopChan)
+
+	// Remove ceph block pool from the map
+	delete(r.blockPoolChannels, cephBlockPoolName)
 }

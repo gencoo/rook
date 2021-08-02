@@ -31,9 +31,7 @@ import (
 
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
-	"github.com/rook/rook/pkg/daemon/ceph/client"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	clienttest "github.com/rook/rook/pkg/daemon/ceph/client/test"
 	"github.com/rook/rook/pkg/operator/ceph/config"
@@ -90,12 +88,9 @@ func newTestStartClusterWithQuorumResponse(t *testing.T, namespace string, monRe
 			if strings.Contains(command, "ceph-authtool") {
 				err := clienttest.CreateConfigDir(path.Join(configDir, namespace))
 				return "", errors.Wrap(err, "failed testing of start cluster without quorum response")
+			} else {
+				return monResponse()
 			}
-			return "", nil
-		},
-		MockExecuteCommandWithOutputFile: func(command string, outFileArg string, args ...string) (string, error) {
-			// mock quorum health check because a second `Start()` triggers a health check
-			return monResponse()
 		},
 	}
 	return &clusterd.Context{
@@ -142,6 +137,42 @@ func TestResourceName(t *testing.T) {
 	assert.Equal(t, "rook-ceph-mon-a", resourceName("rook-ceph-mon-a"))
 	assert.Equal(t, "rook-ceph-mon123", resourceName("rook-ceph-mon123"))
 	assert.Equal(t, "rook-ceph-mon-b", resourceName("b"))
+}
+
+func TestStartMonDeployment(t *testing.T) {
+	ctx := context.TODO()
+	namespace := "ns"
+	context, err := newTestStartCluster(t, namespace)
+	assert.NoError(t, err)
+	c := newCluster(context, namespace, true, v1.ResourceRequirements{})
+	c.ClusterInfo = clienttest.CreateTestClusterInfo(1)
+
+	cm := &v1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: EndpointConfigMapName},
+		Data:       map[string]string{"maxMonId": "1"},
+	}
+	_, err = c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Create(ctx, cm, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	// Start mon a on a specific node since there is no volumeClaimTemplate
+	m := &monConfig{ResourceName: "rook-ceph-mon-a", DaemonName: "a", Port: 3300, PublicIP: "1.2.3.4", DataPathMap: &config.DataPathMap{}}
+	schedule := &MonScheduleInfo{Hostname: "host-a", Zone: "zonea"}
+	err = c.startMon(m, schedule)
+	assert.NoError(t, err)
+	deployment, err := c.context.Clientset.AppsV1().Deployments(c.Namespace).Get(ctx, m.ResourceName, metav1.GetOptions{})
+	assert.NoError(t, err)
+	assert.Equal(t, schedule.Hostname, deployment.Spec.Template.Spec.NodeSelector["kubernetes.io/hostname"])
+
+	// Start mon b on any node in a zone since there is a volumeClaimTemplate
+	m = &monConfig{ResourceName: "rook-ceph-mon-b", DaemonName: "b", Port: 3300, PublicIP: "1.2.3.5", DataPathMap: &config.DataPathMap{}}
+	schedule = &MonScheduleInfo{Hostname: "host-b", Zone: "zoneb"}
+	c.spec.Mon.VolumeClaimTemplate = &v1.PersistentVolumeClaim{}
+	err = c.startMon(m, schedule)
+	assert.NoError(t, err)
+	deployment, err = c.context.Clientset.AppsV1().Deployments(c.Namespace).Get(ctx, m.ResourceName, metav1.GetOptions{})
+	assert.NoError(t, err)
+	// no node selector when there is a volumeClaimTemplate and the mon is assigned to a zone
+	assert.Equal(t, 0, len(deployment.Spec.Template.Spec.NodeSelector))
 }
 
 func TestStartMonPods(t *testing.T) {
@@ -230,6 +261,31 @@ func validateStart(ctx context.Context, t *testing.T, c *Cluster) {
 	// there is only one pod created. the other two won't be created since the first one doesn't start
 	_, err = c.context.Clientset.AppsV1().Deployments(c.Namespace).Get(ctx, "rook-ceph-mon-a", metav1.GetOptions{})
 	assert.NoError(t, err)
+}
+
+func TestPersistMons(t *testing.T) {
+	clientset := test.New(t, 1)
+	ownerInfo := cephclient.NewMinimumOwnerInfoWithOwnerRef()
+	c := New(&clusterd.Context{Clientset: clientset}, "ns", cephv1.ClusterSpec{}, ownerInfo, &sync.Mutex{})
+	setCommonMonProperties(c, 1, cephv1.MonSpec{Count: 3, AllowMultiplePerNode: true}, "myversion")
+
+	// Persist mon a
+	err := c.persistExpectedMonDaemons()
+	assert.NoError(t, err)
+
+	cm, err := c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Get(context.TODO(), EndpointConfigMapName, metav1.GetOptions{})
+	assert.NoError(t, err)
+	assert.Equal(t, "a=1.2.3.1:6789", cm.Data[EndpointDataKey])
+
+	// Persist mon b, and remove mon a for simply testing the configmap is updated
+	c.ClusterInfo.Monitors["b"] = &cephclient.MonInfo{Name: "b", Endpoint: "4.5.6.7:3300"}
+	delete(c.ClusterInfo.Monitors, "a")
+	err = c.persistExpectedMonDaemons()
+	assert.NoError(t, err)
+
+	cm, err = c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Get(context.TODO(), EndpointConfigMapName, metav1.GetOptions{})
+	assert.NoError(t, err)
+	assert.Equal(t, "b=4.5.6.7:3300", cm.Data[EndpointDataKey])
 }
 
 func TestSaveMonEndpoints(t *testing.T) {
@@ -325,7 +381,7 @@ func TestMaxMonID(t *testing.T) {
 }
 
 func TestMonInQuorum(t *testing.T) {
-	entry := client.MonMapEntry{Name: "foo", Rank: 23}
+	entry := cephclient.MonMapEntry{Name: "foo", Rank: 23}
 	quorum := []int{}
 	// Nothing in quorum
 	assert.False(t, monInQuorum(entry, quorum))
@@ -366,7 +422,7 @@ func TestWaitForQuorum(t *testing.T) {
 	namespace := "ns"
 	quorumChecks := 0
 	quorumResponse := func() (string, error) {
-		mons := map[string]*client.MonInfo{
+		mons := map[string]*cephclient.MonInfo{
 			"a": {},
 		}
 		quorumChecks++
@@ -381,17 +437,17 @@ func TestWaitForQuorum(t *testing.T) {
 	assert.NoError(t, err)
 	requireAllInQuorum := false
 	expectedMons := []string{"a"}
-	clusterInfo := &client.ClusterInfo{Namespace: namespace}
+	clusterInfo := &cephclient.ClusterInfo{Namespace: namespace}
 	err = waitForQuorumWithMons(context, clusterInfo, expectedMons, 0, requireAllInQuorum)
 	assert.NoError(t, err)
 }
 
 func TestMonFoundInQuorum(t *testing.T) {
-	response := client.MonStatusResponse{}
+	response := cephclient.MonStatusResponse{}
 
 	// "a" is in quorum
 	response.Quorum = []int{0}
-	response.MonMap.Mons = []client.MonMapEntry{
+	response.MonMap.Mons = []cephclient.MonMapEntry{
 		{Name: "a", Rank: 0},
 		{Name: "b", Rank: 1},
 		{Name: "c", Rank: 2},
@@ -527,7 +583,7 @@ func TestStretchMonVolumeClaimTemplate(t *testing.T) {
 }
 
 func TestArbiterPlacement(t *testing.T) {
-	placement := rookv1.Placement{
+	placement := cephv1.Placement{
 		NodeAffinity: &v1.NodeAffinity{
 			RequiredDuringSchedulingIgnoredDuringExecution: &v1.NodeSelector{
 				NodeSelectorTerms: []v1.NodeSelectorTerm{
@@ -556,19 +612,19 @@ func TestArbiterPlacement(t *testing.T) {
 		},
 	}}
 
-	c.spec.Placement = rookv1.PlacementSpec{}
+	c.spec.Placement = cephv1.PlacementSpec{}
 	c.spec.Placement[cephv1.KeyMonArbiter] = placement
 
 	// No placement is found if not requesting the arbiter placement
 	result := c.getMonPlacement("c")
-	assert.Equal(t, rookv1.Placement{}, result)
+	assert.Equal(t, cephv1.Placement{}, result)
 
 	// Placement is found if requesting the arbiter
 	result = c.getMonPlacement("a")
 	assert.Equal(t, placement, result)
 
 	// Arbiter and all mons have the same placement if no arbiter placement is specified
-	c.spec.Placement = rookv1.PlacementSpec{}
+	c.spec.Placement = cephv1.PlacementSpec{}
 	c.spec.Placement[cephv1.KeyMon] = placement
 	result = c.getMonPlacement("a")
 	assert.Equal(t, placement, result)
@@ -595,9 +651,6 @@ func TestCheckIfArbiterReady(t *testing.T) {
 	balanced := true
 	executor := &exectest.MockExecutor{
 		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
-			return "", fmt.Errorf("unrecognized output command: %s %v", command, args)
-		},
-		MockExecuteCommandWithOutputFile: func(command string, outFileArg string, args ...string) (string, error) {
 			switch {
 			case args[0] == "osd" && args[1] == "crush" && args[2] == "dump":
 				crushBuckets := `

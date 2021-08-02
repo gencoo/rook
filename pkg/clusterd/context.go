@@ -24,6 +24,7 @@ import (
 	"github.com/rook/rook/pkg/util/sys"
 	"github.com/tevino/abool"
 	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -38,6 +39,9 @@ type Context struct {
 	// Clientset is a connection to the core kubernetes API
 	Clientset kubernetes.Interface
 
+	// DynamicClientset is a dynamic connection to the Kubernetes API
+	DynamicClientset dynamic.Interface
+
 	// Represents the Client provided by the controller-runtime package to interact with Kubernetes objects
 	Client client.Client
 
@@ -49,6 +53,9 @@ type Context struct {
 
 	// The implementation of executing a console command
 	Executor exec.Executor
+
+	// The implementation of executing remotely a console command to a given pod
+	RemoteExecutor exec.RemotePodCommandExecutor
 
 	// The root configuration directory used by services
 	ConfigDir string

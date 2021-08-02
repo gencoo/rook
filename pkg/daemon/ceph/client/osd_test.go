@@ -64,7 +64,7 @@ var (
 func TestHostTree(t *testing.T) {
 	executor := &exectest.MockExecutor{}
 	emptyTreeResult := false
-	executor.MockExecuteCommandWithOutputFile = func(command, outputFile string, args ...string) (string, error) {
+	executor.MockExecuteCommandWithOutput = func(command string, args ...string) (string, error) {
 		logger.Infof("Command: %s %v", command, args)
 		switch {
 		case args[0] == "osd" && args[1] == "tree":
@@ -92,7 +92,7 @@ func TestHostTree(t *testing.T) {
 func TestOsdListNum(t *testing.T) {
 	executor := &exectest.MockExecutor{}
 	emptyOsdListNumResult := false
-	executor.MockExecuteCommandWithOutputFile = func(command, outputFile string, args ...string) (string, error) {
+	executor.MockExecuteCommandWithOutput = func(command string, args ...string) (string, error) {
 		logger.Infof("Command: %s %v", command, args)
 		switch {
 		case args[0] == "osd" && args[1] == "ls":
@@ -114,13 +114,40 @@ func TestOsdListNum(t *testing.T) {
 	assert.Equal(t, 0, len(list))
 }
 
+func TestOSDDeviceClasses(t *testing.T) {
+	executor := &exectest.MockExecutor{}
+	executor.MockExecuteCommandWithOutput = func(command string, args ...string) (string, error) {
+		logger.Infof("Command: %s %v", command, args)
+		switch {
+		case args[0] == "osd" && args[1] == "crush" && args[2] == "get-device-class" && len(args) > 3:
+			return fake.OSDDeviceClassOutput(args[3]), nil
+		default:
+			return fake.OSDDeviceClassOutput(""), nil
+		}
+	}
+
+	context := &clusterd.Context{Executor: executor}
+	clusterInfo := AdminClusterInfo("mycluster")
+
+	t.Run("device classes returned", func(t *testing.T) {
+		deviceClasses, err := OSDDeviceClasses(context, clusterInfo, []string{"0"})
+		assert.NoError(t, err)
+		assert.Equal(t, deviceClasses[0].DeviceClass, "hdd")
+	})
+
+	t.Run("error happened when no id provided", func(t *testing.T) {
+		_, err := OSDDeviceClasses(context, clusterInfo, []string{})
+		assert.Error(t, err)
+	})
+}
+
 func TestOSDOkToStop(t *testing.T) {
 	returnString := ""
 	returnOkResult := true
 	seenArgs := []string{}
 
 	executor := &exectest.MockExecutor{}
-	executor.MockExecuteCommandWithOutputFile = func(command, outputFile string, args ...string) (string, error) {
+	executor.MockExecuteCommandWithOutput = func(command string, args ...string) (string, error) {
 		logger.Infof("Command: %s %v", command, args)
 		switch {
 		case args[0] == "osd" && args[1] == "ok-to-stop":

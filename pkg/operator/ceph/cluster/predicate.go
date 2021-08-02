@@ -116,7 +116,6 @@ func watchControllerPredicate(rookContext *clusterd.Context) predicate.Funcs {
 			return true
 		},
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			logger.Debug("update event from a CR")
 			// resource.Quantity has non-exportable fields, so we use its comparator method
 			resourceQtyComparer := cmp.Comparer(func(x, y resource.Quantity) bool { return x.Cmp(y) == 0 })
 
@@ -138,7 +137,7 @@ func watchControllerPredicate(rookContext *clusterd.Context) predicate.Funcs {
 					logger.Infof("CR has changed for %q. diff=%s", objNew.Name, diff)
 					return true
 
-				} else if objOld.GetDeletionTimestamp() != objNew.GetDeletionTimestamp() {
+				} else if !objOld.GetDeletionTimestamp().Equal(objNew.GetDeletionTimestamp()) {
 					// Set the cancellation flag to stop any ongoing orchestration
 					rookContext.RequestCancelOrchestration.Set()
 

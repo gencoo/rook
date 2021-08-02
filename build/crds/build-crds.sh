@@ -17,26 +17,30 @@
 set -o errexit
 set -o pipefail
 
+# set BUILD_CRDS_INTO_DIR to build the CRD results into the given dir instead of in-place
+: "${BUILD_CRDS_INTO_DIR:=}"
+
 SCRIPT_ROOT=$( cd "$( dirname "${BASH_SOURCE[0]}" )/../.." && pwd -P)
 CONTROLLER_GEN_BIN_PATH=$1
 YQ_BIN_PATH=$2
 : "${MAX_DESC_LEN:=-1}"
 # allowDangerousTypes is used to accept float64
-CRD_OPTIONS="crd:maxDescLen=$MAX_DESC_LEN,trivialVersions=true,allowDangerousTypes=true"
-OLM_CATALOG_DIR="${SCRIPT_ROOT}/cluster/olm/ceph/deploy/crds"
-CRDS_FILE_PATH="${SCRIPT_ROOT}/cluster/examples/kubernetes/ceph/crds.yaml"
-HELM_CRDS_FILE_PATH="${SCRIPT_ROOT}/cluster/charts/rook-ceph/templates/resources.yaml"
-CRDS_BEFORE_1_16_FILE_PATH="${SCRIPT_ROOT}/cluster/examples/kubernetes/ceph/pre-k8s-1.16/crds.yaml"
+CRD_OPTIONS="crd:maxDescLen=$MAX_DESC_LEN,trivialVersions=true,generateEmbeddedObjectMeta=true,allowDangerousTypes=true"
+
+DESTINATION_ROOT="$SCRIPT_ROOT"
+if [[ -n "$BUILD_CRDS_INTO_DIR" ]]; then
+  echo "Generating CRDs into dir $BUILD_CRDS_INTO_DIR"
+  DESTINATION_ROOT="$BUILD_CRDS_INTO_DIR"
+fi
+OLM_CATALOG_DIR="${DESTINATION_ROOT}/cluster/olm/ceph/deploy/crds"
+CEPH_CRDS_FILE_PATH="${DESTINATION_ROOT}/cluster/examples/kubernetes/ceph/crds.yaml"
+CEPH_HELM_CRDS_FILE_PATH="${DESTINATION_ROOT}/cluster/charts/rook-ceph/templates/resources.yaml"
+CASSANDRA_CRDS_DIR="${DESTINATION_ROOT}/cluster/examples/kubernetes/cassandra"
+NFS_CRDS_DIR="${DESTINATION_ROOT}/cluster/examples/kubernetes/nfs"
 
 #############
 # FUNCTIONS #
 #############
-# TODO: revisit later
-# ensures the vendor dir has the right deps, e,g. code-generator
-# if [ ! -d vendor/github.com/kube-object-storage/lib-bucket-provisioner/pkg/apis/objectbucket.io/v1alpha1/ ];then
-#   echo "Vendoring project"
-#   go mod vendor
-# fi
 
 copy_ob_obc_crds() {
   mkdir -p "$OLM_CATALOG_DIR"
@@ -45,8 +49,22 @@ copy_ob_obc_crds() {
 }
 
 generating_crds_v1() {
-  echo "Generating v1 in crds.yaml"
+  echo "Generating ceph crds"
   "$CONTROLLER_GEN_BIN_PATH" "$CRD_OPTIONS" paths="./pkg/apis/ceph.rook.io/v1" output:crd:artifacts:config="$OLM_CATALOG_DIR"
+  # the csv upgrade is failing on the volumeClaimTemplate.metadata.annotations.crushDeviceClass unless we preserve the annotations as an unknown field
+  $YQ_BIN_PATH w -i "${OLM_CATALOG_DIR}"/ceph.rook.io_cephclusters.yaml spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.storage.properties.storageClassDeviceSets.items.properties.volumeClaimTemplates.items.properties.metadata.properties.annotations.x-kubernetes-preserve-unknown-fields true
+
+  echo "Generating cassandra crds"
+  "$CONTROLLER_GEN_BIN_PATH" "$CRD_OPTIONS" paths="./pkg/apis/cassandra.rook.io/v1alpha1" output:crd:artifacts:config="$CASSANDRA_CRDS_DIR"
+  # Format with yq for consistent whitespace
+  $YQ_BIN_PATH read $CASSANDRA_CRDS_DIR/cassandra.rook.io_clusters.yaml > $CASSANDRA_CRDS_DIR/crds.yaml
+  rm -f $CASSANDRA_CRDS_DIR/cassandra.rook.io_clusters.yaml
+
+  echo "Generating nfs crds"
+  "$CONTROLLER_GEN_BIN_PATH" "$CRD_OPTIONS" paths="./pkg/apis/nfs.rook.io/v1alpha1" output:crd:artifacts:config="$NFS_CRDS_DIR"
+  # Format with yq for consistent whitespace
+  $YQ_BIN_PATH read $NFS_CRDS_DIR/nfs.rook.io_nfsservers.yaml > $NFS_CRDS_DIR/crds.yaml
+  rm -f $NFS_CRDS_DIR/nfs.rook.io_nfsservers.yaml
 }
 
 generating_crds_v1alpha2() {
@@ -58,10 +76,15 @@ generating_crds_v1alpha2() {
   # "$CONTROLLER_GEN_BIN_PATH" "$CRD_OPTIONS" paths="./vendor/github.com/kube-object-storage/lib-bucket-provisioner/pkg/apis/objectbucket.io/v1alpha1" output:crd:artifacts:config="$OLM_CATALOG_DIR"
 }
 
+generate_vol_rep_crds() {
+  echo "Generating volume replication crds in crds.yaml"
+  "$CONTROLLER_GEN_BIN_PATH" "$CRD_OPTIONS" paths="github.com/csi-addons/volume-replication-operator/api/v1alpha1" output:crd:artifacts:config="$OLM_CATALOG_DIR"
+}
+
 generating_main_crd() {
-  true > "$CRDS_FILE_PATH"
-  true > "$HELM_CRDS_FILE_PATH"
-cat <<EOF > "$CRDS_FILE_PATH"
+  true > "$CEPH_CRDS_FILE_PATH"
+  true > "$CEPH_HELM_CRDS_FILE_PATH"
+cat <<EOF > "$CEPH_CRDS_FILE_PATH"
 ##############################################################################
 # Create the CRDs that are necessary before creating your Rook cluster.
 # These resources *must* be created before the cluster.yaml or their variants.
@@ -75,20 +98,20 @@ build_helm_resources() {
     # add header
     echo "{{- if .Values.crds.enabled }}"
     echo "{{- if semverCompare \">=1.16.0\" .Capabilities.KubeVersion.GitVersion }}"
-    
+
     # Add helm annotations to all CRDS and skip the first 4 lines of crds.yaml
-    "$YQ_BIN_PATH" w -d'*' "$CRDS_FILE_PATH" "metadata.annotations[helm.sh/resource-policy]" keep | tail -n +5
-    
+    "$YQ_BIN_PATH" w -d'*' "$CEPH_CRDS_FILE_PATH" "metadata.annotations[helm.sh/resource-policy]" keep | tail -n +5
+
     # add else
     echo "{{- else }}"
-    
+
     # add footer
-    cat "$CRDS_BEFORE_1_16_FILE_PATH"
+    cat "${SCRIPT_ROOT}/cluster/examples/kubernetes/ceph/pre-k8s-1.16/crds.yaml"
     # DO NOT REMOVE the empty line, it is necessary
     echo ""
     echo "{{- end }}"
     echo "{{- end }}"
-  } >>"$HELM_CRDS_FILE_PATH"
+  } >>"$CEPH_HELM_CRDS_FILE_PATH"
 }
 
 ########
@@ -102,10 +125,15 @@ if [ -z "$NO_OB_OBC_VOL_GEN" ]; then
   generating_crds_v1alpha2
 fi
 
+generate_vol_rep_crds
+
 generating_main_crd
 
 for crd in "$OLM_CATALOG_DIR/"*.yaml; do
-  cat "$crd" >> "$CRDS_FILE_PATH"
+  echo "---" >> "$CEPH_CRDS_FILE_PATH" # yq doesn't output doc separators
+  # Process each intermediate CRD file with yq to enforce consistent formatting in the final product
+  # regardless of whether yq was used in previous steps to alter CRD intermediate files.
+  $YQ_BIN_PATH read "$crd" >> "$CEPH_CRDS_FILE_PATH"
 done
 
 build_helm_resources

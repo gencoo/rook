@@ -14,12 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 '''
 
+import errno
 import sys
 import json
 import argparse
 import unittest
 import re
 import requests
+import subprocess
 from os import linesep as LINESEP
 from os import path
 
@@ -78,10 +80,12 @@ class DummyRados(object):
         self.cmd_names['fs ls'] = '''{"format": "json", "prefix": "fs ls"}'''
         self.cmd_names['quorum_status'] = '''{"format": "json", "prefix": "quorum_status"}'''
         self.cmd_names['caps_change_default_pool_prefix'] = '''{"caps": ["mon", "allow r, allow command quorum_status, allow command version", "mgr", "allow command config", "osd", "allow rwx pool=default.rgw.meta, allow r pool=.rgw.root, allow rw pool=default.rgw.control, allow rx pool=default.rgw.log, allow x pool=default.rgw.buckets.index"], "entity": "client.healthchecker", "format": "json", "prefix": "auth caps"}'''
+        self.cmd_names['mgr services'] = '''{"format": "json", "prefix": "mgr services"}'''
         # all the commands and their output
         self.cmd_output_map[self.cmd_names['fs ls']
                             ] = '''[{"name":"myfs","metadata_pool":"myfs-metadata","metadata_pool_id":2,"data_pool_ids":[3],"data_pools":["myfs-data0"]}]'''
         self.cmd_output_map[self.cmd_names['quorum_status']] = '''{"election_epoch":3,"quorum":[0],"quorum_names":["a"],"quorum_leader_name":"a","quorum_age":14385,"features":{"quorum_con":"4540138292836696063","quorum_mon":["kraken","luminous","mimic","osdmap-prune","nautilus","octopus"]},"monmap":{"epoch":1,"fsid":"af4e1673-0b72-402d-990a-22d2919d0f1c","modified":"2020-05-07T03:36:39.918035Z","created":"2020-05-07T03:36:39.918035Z","min_mon_release":15,"min_mon_release_name":"octopus","features":{"persistent":["kraken","luminous","mimic","osdmap-prune","nautilus","octopus"],"optional":[]},"mons":[{"rank":0,"name":"a","public_addrs":{"addrvec":[{"type":"v2","addr":"10.110.205.174:3300","nonce":0},{"type":"v1","addr":"10.110.205.174:6789","nonce":0}]},"addr":"10.110.205.174:6789/0","public_addr":"10.110.205.174:6789/0","priority":0,"weight":0}]}}'''
+        self.cmd_output_map[self.cmd_names['mgr services']] = '''{"dashboard":"https://ceph-dashboard:8443/","prometheus":"http://ceph-dashboard-db:9283/"}'''
         self.cmd_output_map['''{"caps": ["mon", "allow r, allow command quorum_status", "osd", "allow rwx pool=default.rgw.meta, allow r pool=.rgw.root, allow rw pool=default.rgw.control, allow x pool=default.rgw.buckets.index"], "entity": "client.healthchecker", "format": "json", "prefix": "auth get-or-create"}'''] = '''[{"entity":"client.healthchecker","key":"AQDFkbNeft5bFRAATndLNUSEKruozxiZi3lrdA==","caps":{"mon":"allow r, allow command quorum_status","osd":"allow rwx pool=default.rgw.meta, allow r pool=.rgw.root, allow rw pool=default.rgw.control, allow x pool=default.rgw.buckets.index"}}]'''
         self.cmd_output_map['''{"caps": ["mon", "profile rbd", "osd", "profile rbd"], "entity": "client.csi-rbd-node", "format": "json", "prefix": "auth get-or-create"}'''] = '''[{"entity":"client.csi-rbd-node","key":"AQBOgrNeHbK1AxAAubYBeV8S1U/GPzq5SVeq6g==","caps":{"mon":"profile rbd","osd":"profile rbd"}}]'''
         self.cmd_output_map['''{"caps": ["mon", "profile rbd", "mgr", "allow rw", "osd", "profile rbd"], "entity": "client.csi-rbd-provisioner", "format": "json", "prefix": "auth get-or-create"}'''] = '''[{"entity":"client.csi-rbd-provisioner","key":"AQBNgrNe1geyKxAA8ekViRdE+hss5OweYBkwNg==","caps":{"mgr":"allow rw","mon":"profile rbd","osd":"profile rbd"}}]'''
@@ -138,6 +142,7 @@ class DummyRados(object):
 
 class RadosJSON:
     EXTERNAL_USER_NAME = "client.healthchecker"
+    EXTERNAL_RGW_ADMIN_OPS_USER_NAME = "rgw-admin-ops-user"
     EMPTY_OUTPUT_LIST = "Empty output list"
     DEFAULT_RGW_POOL_PREFIX = "default"
     DEFAULT_MONITORING_ENDPOINT_PORT = "9283"
@@ -173,6 +178,10 @@ class RadosJSON:
                                   help="Provides the name of the RBD datapool")
         output_group.add_argument("--rgw-endpoint", default="", required=False,
                                   help="Rados GateWay endpoint (in <IP>:<PORT> format)")
+        output_group.add_argument("--rgw-tls-cert-path", default="", required=False,
+                                  help="Rados GateWay endpoint TLS certificate")
+        output_group.add_argument("--rgw-skip-tls", required=False, default=False,
+                                  help="Ignore TLS certification validation when a self-signed certificate is provided (NOT RECOMMENDED")
         output_group.add_argument("--monitoring-endpoint", default="", required=False,
                                   help="Ceph Manager prometheus exporter endpoints (comma separated list of <IP> entries of active and standby mgrs)")
         output_group.add_argument("--monitoring-endpoint-port", default="", required=False,
@@ -188,6 +197,12 @@ class RadosJSON:
         else:
             args_to_parse = sys.argv[1:]
         return argP.parse_args(args_to_parse)
+
+    def validate_rgw_endpoint_tls_cert(self):
+        if self._arg_parser.rgw_tls_cert_path:
+            with open(self._arg_parser.rgw_tls_cert_path, encoding='utf8') as f:
+                contents = f.read()
+                return contents.rstrip()
 
     def _check_conflicting_options(self):
         if not self._arg_parser.upgrade and not self._arg_parser.rbd_data_pool_name:
@@ -227,7 +242,7 @@ class RadosJSON:
                 "Out of range port number: {}".format(port))
         return False
 
-    def endpoint_dial(self, endpoint_str, timeout=3):
+    def endpoint_dial(self, endpoint_str, timeout=3, cert=None):
         # if the 'cluster' instance is a dummy one,
         # don't try to reach out to the endpoint
         if isinstance(self.cluster, DummyRados):
@@ -236,7 +251,14 @@ class RadosJSON:
         for prefix in protocols:
             try:
                 ep = "{}://{}".format(prefix, endpoint_str)
-                r = requests.head(ep, timeout=timeout)
+                # If verify is set to a path to a directory,
+                # the directory must have been processed using the c_rehash utility supplied with OpenSSL.
+                if prefix == "https" and cert and self._arg_parser.rgw_skip_tls:
+                    r = requests.head(ep, timeout=timeout, verify=False)
+                elif prefix == "https" and cert:
+                    r = requests.head(ep, timeout=timeout, verify=cert)
+                else:
+                    r = requests.head(ep, timeout=timeout)
                 if r.status_code == 200:
                     return
             except:
@@ -309,6 +331,16 @@ class RadosJSON:
         if len(q_leader_matching_list) == 0:
             raise ExecutionFailureException("No matching 'mon' details found")
         q_leader_details = q_leader_matching_list[0]
+        # get the address vector of the quorum-leader
+        q_leader_addrvec = q_leader_details.get(
+            'public_addrs', {}).get('addrvec', [])
+        # if the quorum-leader has only one address in the address-vector
+        # and it is of type 'v2' (ie; with <IP>:3300),
+        # raise an exception to make user aware that
+        # they have to enable 'v1' (ie; with <IP>:6789) type as well
+        if len(q_leader_addrvec) == 1 and q_leader_addrvec[0]['type'] == 'v2':
+            raise ExecutionFailureException(
+                "Only 'v2' address type is enabled, user should also enable 'v1' type as well")
         ip_port = str(q_leader_details['public_addr'].split('/')[0])
         return "{}={}".format(str(q_leader_name), ip_port)
 
@@ -347,12 +379,13 @@ class RadosJSON:
                 raise ExecutionFailureException(
                     "'mgr services' command failed.\n" +
                     "Error: {}".format(err_msg if ret_val != 0 else self.EMPTY_OUTPUT_LIST))
-            monitoring_endpoint = json_out.get('mgrmap', {}).get('services', {}).get('prometheus', '')
+            monitoring_endpoint = json_out.get('mgrmap', {}).get(
+                'services', {}).get('prometheus', '')
             if not monitoring_endpoint:
                 raise ExecutionFailureException(
                     "'prometheus' service not found, is the exporter enabled?'.\n")
             # now check the stand-by mgr-s
-            standby_arr = json_out.get('mgrmap',{}).get('standbys', [])
+            standby_arr = json_out.get('mgrmap', {}).get('standbys', [])
             for each_standby in standby_arr:
                 if 'name' in each_standby.keys():
                     standby_mgrs.append(each_standby['name'])
@@ -378,10 +411,10 @@ class RadosJSON:
             for each_standby_mgr in standby_mgrs:
                 failed_ip = each_standby_mgr
                 mgr_ips.append(
-                        self._convert_hostname_to_ip(each_standby_mgr))
+                    self._convert_hostname_to_ip(each_standby_mgr))
         except:
             raise ExecutionFailureException(
-                "Conversion of host: {} to IP failed. "\
+                "Conversion of host: {} to IP failed. "
                 "Please enter the IP addresses of all the ceph-mgrs with the '--monitoring-endpoint' flag".format(failed_ip))
         monitoring_endpoint = self._join_host_port(
             monitoring_endpoint_ip, monitoring_endpoint_port)
@@ -555,6 +588,43 @@ class RadosJSON:
                 "Error: {}".format(err_msg if ret_val != 0 else self.EMPTY_OUTPUT_LIST))
         return str(json_out[0]['key'])
 
+    def get_ceph_dashboard_link(self):
+        cmd_json = {"prefix": "mgr services", "format": "json"}
+        ret_val, json_out, _ = self._common_cmd_json_gen(cmd_json)
+        # if there is an unsuccessful attempt,
+        if ret_val != 0 or len(json_out) == 0:
+            return None
+        if not 'dashboard' in json_out:
+            return None
+        return json_out['dashboard']
+
+    def create_rgw_admin_ops_user(self):
+        cmd = ['radosgw-admin', 'user', 'create', '--uid', self.EXTERNAL_RGW_ADMIN_OPS_USER_NAME, '--display-name',
+               'Rook RGW Admin Ops user', '--caps', 'buckets=*;users=*;usage=read;metadata=read;zone=read']
+        try:
+            output = subprocess.check_output(cmd,
+                                             stderr=subprocess.PIPE)
+        except subprocess.CalledProcessError as exec:
+            # if the user already exists, we just query it
+            if exec.returncode == errno.EEXIST:
+                cmd = ['radosgw-admin', 'user', 'info',
+                       '--uid', self.EXTERNAL_RGW_ADMIN_OPS_USER_NAME
+                       ]
+                try:
+                    output = subprocess.check_output(cmd,
+                                                     stderr=subprocess.PIPE)
+                except subprocess.CalledProcessError as exec:
+                    err_msg = "failed to execute command %s. Output: %s. Code: %s. Error: %s" % (
+                        cmd, exec.output, exec.returncode, exec.stderr)
+                    raise Exception(err_msg)
+            else:
+                err_msg = "failed to execute command %s. Output: %s. Code: %s. Error: %s" % (
+                    cmd, exec.output, exec.returncode, exec.stderr)
+                raise Exception(err_msg)
+
+        jsonoutput = json.loads(output)
+        return jsonoutput["keys"][0]['access_key'], jsonoutput["keys"][0]['secret_key']
+
     def _gen_output_map(self):
         if self.out_map:
             return
@@ -562,7 +632,8 @@ class RadosJSON:
         # if rgw_endpoint is provided, validate it
         if self._arg_parser.rgw_endpoint:
             self._invalid_endpoint(self._arg_parser.rgw_endpoint)
-            self.endpoint_dial(self._arg_parser.rgw_endpoint)
+            self.endpoint_dial(self._arg_parser.rgw_endpoint,
+                               cert=self.validate_rgw_endpoint_tls_cert())
             rgw_pool_to_validate = ["{0}.rgw.meta".format(self._arg_parser.rgw_pool_prefix),
                                     ".rgw.root",
                                     "{0}.rgw.control".format(
@@ -570,6 +641,7 @@ class RadosJSON:
                 "{0}.rgw.log".format(
                 self._arg_parser.rgw_pool_prefix)]
             pools_to_validate.extend(rgw_pool_to_validate)
+
         for pool in pools_to_validate:
             if not self.cluster.pool_exists(pool):
                 raise ExecutionFailureException(
@@ -582,6 +654,7 @@ class RadosJSON:
         self.out_map['ROOK_EXTERNAL_USERNAME'] = self.run_as_user
         self.out_map['ROOK_EXTERNAL_CEPH_MON_DATA'] = self.get_ceph_external_mon_data()
         self.out_map['ROOK_EXTERNAL_USER_SECRET'] = self.create_checkerKey()
+        self.out_map['ROOK_EXTERNAL_DASHBOARD_LINK'] = self.get_ceph_dashboard_link()
         self.out_map['CSI_RBD_NODE_SECRET_SECRET'] = self.create_cephCSIKeyring_RBDNode()
         self.out_map['CSI_RBD_PROVISIONER_SECRET'] = self.create_cephCSIKeyring_RBDProvisioner()
         self.out_map['CEPHFS_POOL_NAME'] = self._arg_parser.cephfs_data_pool_name
@@ -594,10 +667,15 @@ class RadosJSON:
             )
             self.out_map['CSI_CEPHFS_PROVISIONER_SECRET'] = self.create_cephCSIKeyring_cephFSProvisioner()
         self.out_map['RGW_ENDPOINT'] = self._arg_parser.rgw_endpoint
+        self.out_map['RGW_TLS_CERT'] = ''
         self.out_map['MONITORING_ENDPOINT'], \
             self.out_map['MONITORING_ENDPOINT_PORT'] = self.get_active_and_standby_mgrs()
         self.out_map['RBD_POOL_NAME'] = self._arg_parser.rbd_data_pool_name
         self.out_map['RGW_POOL_PREFIX'] = self._arg_parser.rgw_pool_prefix
+        if self._arg_parser.rgw_endpoint:
+            self.out_map['ACCESS_KEY'], self.out_map['SECRET_KEY'] = self.create_rgw_admin_ops_user()
+            if self._arg_parser.rgw_tls_cert_path:
+                self.out_map['RGW_TLS_CERT'] = self.validate_rgw_endpoint_tls_cert()
 
     def gen_shell_out(self):
         self._gen_output_map()
@@ -663,6 +741,16 @@ class RadosJSON:
             }
         ]
 
+        # if 'ROOK_EXTERNAL_DASHBOARD_LINK' exists, then only add 'rook-ceph-dashboard-link' Secret
+        if self.out_map['ROOK_EXTERNAL_DASHBOARD_LINK']:
+            json_out.append({
+                "name": "rook-ceph-dashboard-link",
+                "kind": "Secret",
+                "data": {
+                    "userID": 'ceph-dashboard-link',
+                    "userKey": self.out_map['ROOK_EXTERNAL_DASHBOARD_LINK']
+                }
+            })
         # if 'CSI_RBD_PROVISIONER_SECRET' exists, then only add 'rook-csi-rbd-provisioner' Secret
         if self.out_map['CSI_RBD_PROVISIONER_SECRET']:
             json_out.append({
@@ -711,6 +799,24 @@ class RadosJSON:
                 "data": {
                     "endpoint": self.out_map['RGW_ENDPOINT'],
                     "poolPrefix": self.out_map['RGW_POOL_PREFIX']
+                }
+            })
+            json_out.append(
+                {
+                    "name": "rgw-admin-ops-user",
+                    "kind": "Secret",
+                    "data": {
+                        "accessKey": self.out_map['ACCESS_KEY'],
+                        "secretKey": self.out_map['SECRET_KEY']
+                    }
+                })
+        # if 'RGW_TLS_CERT' exists, then only add the "ceph-rgw-tls-cert" secret
+        if self.out_map['RGW_TLS_CERT']:
+            json_out.append({
+                "name": "ceph-rgw-tls-cert",
+                "kind": "Secret",
+                "data": {
+                    "cert": self.out_map['RGW_TLS_CERT'],
                 }
             })
         return json.dumps(json_out)+LINESEP
