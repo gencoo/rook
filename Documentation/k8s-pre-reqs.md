@@ -12,9 +12,10 @@ you can quickly set one up using [Minikube](#minikube), [Kubeadm](#kubeadm) or [
 
 ## Minimum Version
 
-Kubernetes **v1.11** or higher is supported by Rook.
+Kubernetes **v1.11** or higher is supported for the Ceph operator.
+Kubernetes **v1.16** or higher is supported for the Cassandra and NFS operators.
 
-**Important** If you are using K8s 1.15 or older, you will need to create a different version of the Rook CRDs. Create the `crds.yaml` found in the [pre-k8s-1.16](https://github.com/rook/rook/blob/{{ branchName }}/cluster/examples/kubernetes/ceph/pre-k8s-1.16) subfolder of the example manifests.
+**Important** If you are using K8s 1.15 or older, you will need to create a different version of the Ceph CRDs. Create the `crds.yaml` found in the [pre-k8s-1.16](https://github.com/rook/rook/blob/{{ branchName }}/cluster/examples/kubernetes/ceph/pre-k8s-1.16) subfolder of the example manifests.
 
 ## Ceph Prerequisites
 
@@ -127,7 +128,7 @@ imagePullSecrets:
 The service accounts are:
 
 * `rook-ceph-system` (namespace: `rook-ceph`): Will affect all pods created by the rook operator in the `rook-ceph` namespace.
-* `rook-ceph-default` (namespace: `rook-ceph`): Will affect most pods in the `rook-ceph` namespace.
+* `default` (namespace: `rook-ceph`): Will affect most pods in the `rook-ceph` namespace.
 * `rook-ceph-mgr` (namespace: `rook-ceph`): Will affect the MGR pods in the `rook-ceph` namespace.
 * `rook-ceph-osd` (namespace: `rook-ceph`): Will affect the OSD pods in the `rook-ceph` namespace.
 
@@ -153,14 +154,6 @@ imagePullSecrets:                # here are the new
 ```
 
 After doing this for all service accounts all pods should be able to pull the image from your registry.
-
-### Helm Configuration
-
-In [Values.yaml](https://github.com/rook/rook/blob/master/cluster/charts/rook-ceph/values.yaml) populate `imagePullSecrets` to be set on all service accounts.
-```yaml
-imagePullSecrets:
- - name: my-registry-secret
-```
 
 ## Bootstrapping Kubernetes
 

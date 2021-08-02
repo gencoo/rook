@@ -31,10 +31,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/operator/ceph/disruption/controllerconfig"
 	"github.com/rook/rook/pkg/operator/k8sutil"
-
-	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	policyv1beta1 "k8s.io/api/policy/v1beta1"
 )
 
@@ -169,8 +169,8 @@ func (r *ReconcileClusterDisruption) reconcile(request reconcile.Request) (recon
 		return reconcile.Result{}, nil
 	}
 
-	// get all failure domains and the draining failure domains list
-	allFailureDomains, drainingFailureDomains, err := r.getOSDFailureDomains(clusterInfo, request, poolFailureDomain)
+	// get a list of all the failure domains, failure domains with failed OSDs and failure domains with drained nodes
+	allFailureDomains, nodeDrainFailureDomains, osdDownFailureDomains, err := r.getOSDFailureDomains(clusterInfo, request, poolFailureDomain)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -181,17 +181,8 @@ func (r *ReconcileClusterDisruption) reconcile(request reconcile.Request) (recon
 		return reconcile.Result{}, err
 	}
 
-	err = r.reconcilePDBsForOSDs(clusterInfo, request, pdbStateMap, poolFailureDomain, allFailureDomains, drainingFailureDomains)
-	if err != nil {
-		return reconcile.Result{}, err
-	}
-
-	disabledPDB, ok := pdbStateMap.Data[drainingFailureDomainKey]
-	if ok && len(disabledPDB) > 0 {
-		return reconcile.Result{Requeue: true, RequeueAfter: 30 * time.Second}, nil
-	}
-
-	return reconcile.Result{}, nil
+	activeNodeDrains := len(nodeDrainFailureDomains) > 0
+	return r.reconcilePDBsForOSDs(clusterInfo, request, pdbStateMap, poolFailureDomain, allFailureDomains, osdDownFailureDomains, activeNodeDrains)
 }
 
 // ClusterMap maintains the association between namespace and clusername
@@ -271,7 +262,17 @@ func (r *ReconcileClusterDisruption) deleteDrainCanaryPods(namespace string) err
 }
 
 func (r *ReconcileClusterDisruption) deleteLegacyPDBForOSD(namespace string) error {
-	err := r.client.DeleteAllOf(context.TODO(), &policyv1beta1.PodDisruptionBudget{}, client.InNamespace(namespace),
+	var podDisruptionBudget client.Object
+	usePDBV1Beta1, err := k8sutil.UsePDBV1Beta1Version(r.context.ClusterdContext.Clientset)
+	if err != nil {
+		return errors.Wrap(err, "failed to fetch pdb version")
+	}
+	if usePDBV1Beta1 {
+		podDisruptionBudget = &policyv1beta1.PodDisruptionBudget{}
+	} else {
+		podDisruptionBudget = &policyv1.PodDisruptionBudget{}
+	}
+	err = r.client.DeleteAllOf(context.TODO(), podDisruptionBudget, client.InNamespace(namespace),
 		client.MatchingLabels{k8sutil.AppAttr: legacyOSDPDBLabel})
 	if err != nil && !kerrors.IsNotFound(err) {
 		return errors.Wrapf(err, "failed to delete legacy OSD PDBs with label %q", legacyOSDPDBLabel)

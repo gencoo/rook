@@ -18,10 +18,15 @@ limitations under the License.
 package objectuser
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"io/ioutil"
+	"net/http"
 	"testing"
 	"time"
 
+	"github.com/ceph/go-ceph/rgw/admin"
 	"github.com/coreos/pkg/capnslog"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	rookclient "github.com/rook/rook/pkg/client/clientset/versioned/fake"
@@ -29,10 +34,10 @@ import (
 	"github.com/rook/rook/pkg/operator/test"
 
 	"github.com/rook/rook/pkg/clusterd"
+	cephobject "github.com/rook/rook/pkg/operator/ceph/object"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
-	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -120,7 +125,7 @@ func TestCephObjectStoreUserController(t *testing.T) {
 	}
 
 	executor := &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(command, outfile string, args ...string) (string, error) {
+		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
 			if args[0] == "status" {
 				return `{"fsid":"c47cac40-9bee-4d52-823b-ccd803ba5bfe","health":{"checks":{},"status":"HEALTH_ERR"},"pgmap":{"num_pgs":100,"pgs_by_state":[{"state_name":"active+clean","count":100}]}}`, nil
 			}
@@ -197,7 +202,7 @@ func TestCephObjectStoreUserController(t *testing.T) {
 		"mon-secret":   []byte("monsecret"),
 		"admin-secret": []byte("adminsecret"),
 	}
-	secret := &v1.Secret{
+	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "rook-ceph-mon",
 			Namespace: namespace,
@@ -216,7 +221,7 @@ func TestCephObjectStoreUserController(t *testing.T) {
 	cl = fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(object...).Build()
 
 	executor = &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(command, outfile string, args ...string) (string, error) {
+		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
 			if args[0] == "status" {
 				return `{"fsid":"c47cac40-9bee-4d52-823b-ccd803ba5bfe","health":{"checks":{},"status":"HEALTH_OK"},"pgmap":{"num_pgs":100,"pgs_by_state":[{"state_name":"active+clean","count":100}]}}`, nil
 			}
@@ -254,6 +259,11 @@ func TestCephObjectStoreUserController(t *testing.T) {
 		TypeMeta: metav1.TypeMeta{
 			Kind: "CephObjectStore",
 		},
+		Spec: cephv1.ObjectStoreSpec{
+			Gateway: cephv1.GatewaySpec{
+				Port: 80,
+			},
+		},
 		Status: &cephv1.ObjectStoreStatus{
 			Info: map[string]string{"endpoint": "http://rook-ceph-rgw-my-store.rook-ceph:80"},
 		},
@@ -288,8 +298,38 @@ func TestCephObjectStoreUserController(t *testing.T) {
 
 	// Get the updated object.
 	logger.Info("STARTING PHASE 5")
+	// Create RGW pod
 	err = r.client.Create(context.TODO(), rgwPod)
 	assert.NoError(t, err)
+
+	// Mock client
+	newMultisiteAdminOpsCtxFunc = func(objContext *cephobject.Context, spec *cephv1.ObjectStoreSpec) (*cephobject.AdminOpsContext, error) {
+		mockClient := &cephobject.MockClient{
+			MockDo: func(req *http.Request) (*http.Response, error) {
+				if req.URL.RawQuery == "display-name=my-user&format=json&uid=my-user" && req.Method == http.MethodGet && req.URL.Path == "rook-ceph-rgw-my-store.mycluster.svc/admin/user" {
+					return &http.Response{
+						StatusCode: 200,
+						Body:       ioutil.NopCloser(bytes.NewReader([]byte(userCreateJSON))),
+					}, nil
+				}
+				return nil, fmt.Errorf("unexpected request: %q. method %q. path %q", req.URL.RawQuery, req.Method, req.URL.Path)
+			},
+		}
+
+		context, err := cephobject.NewMultisiteContext(r.context, r.clusterInfo, cephObjectStore)
+		assert.NoError(t, err)
+		adminClient, err := admin.New("rook-ceph-rgw-my-store.mycluster.svc", "53S6B9S809NUP19IJ2K3", "1bXPegzsGClvoGAiJdHQD1uOW2sQBLAZM9j9VtXR", mockClient)
+		assert.NoError(t, err)
+
+		return &cephobject.AdminOpsContext{
+			Context:               *context,
+			AdminOpsUserAccessKey: "53S6B9S809NUP19IJ2K3",
+			AdminOpsUserSecretKey: "1bXPegzsGClvoGAiJdHQD1uOW2sQBLAZM9j9VtXR",
+			AdminOpsClient:        adminClient,
+		}, nil
+	}
+
+	// Run reconcile
 	res, err = r.Reconcile(ctx, req)
 	assert.NoError(t, err)
 	assert.False(t, res.Requeue)

@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
@@ -74,7 +75,7 @@ func WatchControllerPredicate() predicate.Funcs {
 				if diff != "" {
 					logger.Infof("CR has changed for %q. diff=%s", objNew.Name, diff)
 					return true
-				} else if objOld.GetDeletionTimestamp() != objNew.GetDeletionTimestamp() {
+				} else if objectToBeDeleted(objOld, objNew) {
 					logger.Debugf("CR %q is going be deleted", objNew.Name)
 					return true
 				} else if objOld.GetGeneration() != objNew.GetGeneration() {
@@ -99,7 +100,7 @@ func WatchControllerPredicate() predicate.Funcs {
 				if diff != "" {
 					logger.Infof("CR has changed for %q. diff=%s", objNew.Name, diff)
 					return true
-				} else if objOld.GetDeletionTimestamp() != objNew.GetDeletionTimestamp() {
+				} else if objectToBeDeleted(objOld, objNew) {
 					logger.Debugf("CR %q is going be deleted", objNew.Name)
 					return true
 				} else if objOld.GetGeneration() != objNew.GetGeneration() {
@@ -119,7 +120,7 @@ func WatchControllerPredicate() predicate.Funcs {
 				if diff != "" {
 					logger.Infof("CR has changed for %q. diff=%s", objNew.Name, diff)
 					return true
-				} else if objOld.GetDeletionTimestamp() != objNew.GetDeletionTimestamp() {
+				} else if objectToBeDeleted(objOld, objNew) {
 					logger.Debugf("CR %q is going be deleted", objNew.Name)
 					return true
 				} else if objOld.GetGeneration() != objNew.GetGeneration() {
@@ -139,7 +140,7 @@ func WatchControllerPredicate() predicate.Funcs {
 				if diff != "" {
 					logger.Infof("CR has changed for %q. diff=%s", objNew.Name, diff)
 					return true
-				} else if objOld.GetDeletionTimestamp() != objNew.GetDeletionTimestamp() {
+				} else if objectToBeDeleted(objOld, objNew) {
 					logger.Debugf("CR %q is going be deleted", objNew.Name)
 					return true
 				} else if objOld.GetGeneration() != objNew.GetGeneration() {
@@ -159,7 +160,7 @@ func WatchControllerPredicate() predicate.Funcs {
 				if diff != "" {
 					logger.Infof("CR has changed for %q. diff=%s", objNew.Name, diff)
 					return true
-				} else if objOld.GetDeletionTimestamp() != objNew.GetDeletionTimestamp() {
+				} else if objectToBeDeleted(objOld, objNew) {
 					logger.Debugf("CR %q is going be deleted", objNew.Name)
 					return true
 				} else if objOld.GetGeneration() != objNew.GetGeneration() {
@@ -179,7 +180,7 @@ func WatchControllerPredicate() predicate.Funcs {
 				if diff != "" {
 					logger.Infof("CR has changed for %q. diff=%s", objNew.Name, diff)
 					return true
-				} else if objOld.GetDeletionTimestamp() != objNew.GetDeletionTimestamp() {
+				} else if objectToBeDeleted(objOld, objNew) {
 					logger.Debugf("CR %q is going be deleted", objNew.Name)
 					return true
 				} else if objOld.GetGeneration() != objNew.GetGeneration() {
@@ -199,7 +200,7 @@ func WatchControllerPredicate() predicate.Funcs {
 				if diff != "" {
 					logger.Infof("CR has changed for %q. diff=%s", objNew.Name, diff)
 					return true
-				} else if objOld.GetDeletionTimestamp() != objNew.GetDeletionTimestamp() {
+				} else if objectToBeDeleted(objOld, objNew) {
 					logger.Debugf("CR %q is going be deleted", objNew.Name)
 					return true
 				} else if objOld.GetGeneration() != objNew.GetGeneration() {
@@ -224,7 +225,7 @@ func WatchControllerPredicate() predicate.Funcs {
 				if diff != "" {
 					logger.Infof("CR has changed for %q. diff=%s", objNew.Name, diff)
 					return true
-				} else if objOld.GetDeletionTimestamp() != objNew.GetDeletionTimestamp() {
+				} else if objectToBeDeleted(objOld, objNew) {
 					logger.Debugf("CR %q is going be deleted", objNew.Name)
 					return true
 				} else if objOld.GetGeneration() != objNew.GetGeneration() {
@@ -249,7 +250,7 @@ func WatchControllerPredicate() predicate.Funcs {
 				if diff != "" {
 					logger.Infof("CR has changed for %q. diff=%s", objNew.Name, diff)
 					return true
-				} else if objOld.GetDeletionTimestamp() != objNew.GetDeletionTimestamp() {
+				} else if objectToBeDeleted(objOld, objNew) {
 					logger.Debugf("CR %q is going be deleted", objNew.Name)
 					return true
 				} else if objOld.GetGeneration() != objNew.GetGeneration() {
@@ -274,7 +275,7 @@ func WatchControllerPredicate() predicate.Funcs {
 				if diff != "" {
 					logger.Infof("CR has changed for %q. diff=%s", objNew.Name, diff)
 					return true
-				} else if objOld.GetDeletionTimestamp() != objNew.GetDeletionTimestamp() {
+				} else if objectToBeDeleted(objOld, objNew) {
 					logger.Debugf("CR %q is going be deleted", objNew.Name)
 					return true
 				} else if objOld.GetGeneration() != objNew.GetGeneration() {
@@ -299,7 +300,7 @@ func WatchControllerPredicate() predicate.Funcs {
 				if diff != "" {
 					logger.Infof("CR has changed for %q. diff=%s", objNew.Name, diff)
 					return true
-				} else if objOld.GetDeletionTimestamp() != objNew.GetDeletionTimestamp() {
+				} else if objectToBeDeleted(objOld, objNew) {
 					logger.Debugf("CR %q is going be deleted", objNew.Name)
 					return true
 				} else if objOld.GetGeneration() != objNew.GetGeneration() {
@@ -335,7 +336,6 @@ func WatchCephClusterPredicate() predicate.Funcs {
 			return true
 		},
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			logger.Debug("update event from a CR")
 			// resource.Quantity has non-exportable fields, so we use its comparator method
 			resourceQtyComparer := cmp.Comparer(func(x, y resource.Quantity) bool { return x.Cmp(y) == 0 })
 
@@ -373,6 +373,10 @@ func WatchCephClusterPredicate() predicate.Funcs {
 	}
 }
 
+func objectToBeDeleted(oldObj, newObj client.Object) bool {
+	return !oldObj.GetDeletionTimestamp().Equal(newObj.GetDeletionTimestamp())
+}
+
 // objectChanged checks whether the object has been updated
 func objectChanged(oldObj, newObj runtime.Object, objectName string) (bool, error) {
 	var doReconcile bool
@@ -396,12 +400,21 @@ func objectChanged(oldObj, newObj runtime.Object, objectName string) (bool, erro
 		doReconcile = true
 		return doReconcile, errors.Wrap(err, "failed to calculate object diff but let's reconcile just in case")
 	} else if diff.IsEmpty() {
-		logger.Debug("diff is empty nothing to reconcile")
+		logger.Debugf("object %q diff is empty, nothing to reconcile", objectName)
 		return doReconcile, nil
 	}
-	logger.Debugf("object diff is %s", diff.String())
 
-	return isValidEvent(diff.Patch, objectName), nil
+	// Do not leak details of diff if the object contains sensitive data (e.g., it is a Secret)
+	isSensitive := false
+	if _, ok := new.(*corev1.Secret); ok {
+		logger.Debugf("object %q diff is [redacted for Secrets]", objectName)
+		isSensitive = true
+	} else {
+		logger.Debugf("object %q diff is %s", objectName, diff.String())
+		isSensitive = false
+	}
+
+	return isValidEvent(diff.Patch, objectName, isSensitive), nil
 }
 
 // WatchPredicateForNonCRDObject is a special filter for create events
@@ -514,17 +527,19 @@ func WatchPredicateForNonCRDObject(owner runtime.Object, scheme *runtime.Scheme)
 	}
 }
 
-// isValidEvent analyses the diff between two objects events and determines
-// if we should reconcile that event or not
-// The goal is to avoid double-reconcile as much as possible
-func isValidEvent(patch []byte, objectName string) bool {
+// isValidEvent analyses the diff between two objects events and determines if we should reconcile
+// that event or not. The goal is to avoid double-reconcile as much as possible.
+// If the patch could contain sensitive data, isValidEvent will not leak the data to logs.
+func isValidEvent(patch []byte, objectName string, patchContainsSensitiveData bool) bool {
 	var p map[string]interface{}
 	err := json.Unmarshal(patch, &p)
 	if err != nil {
-		logger.Errorf("failed to unmarshal patch. %v", err)
+		logErrorUnlessSensitive("failed to unmarshal patch", err, patchContainsSensitiveData)
 		return false
 	}
-	logger.Debugf("patch before trimming is %s", string(patch))
+	if !patchContainsSensitiveData {
+		logger.Debugf("patch before trimming is %s", string(patch))
+	}
 
 	// don't reconcile on status update on an object (e.g. status "creating")
 	logger.Debugf("trimming 'status' field from patch")
@@ -543,14 +558,26 @@ func isValidEvent(patch []byte, objectName string) bool {
 	// Re-marshal to get the last diff
 	patch, err = json.Marshal(p)
 	if err != nil {
-		logger.Errorf("failed to marshal patch. %v", err)
+		logErrorUnlessSensitive("failed to marshal patch", err, patchContainsSensitiveData)
 		return false
 	}
 
 	// If after all the filtering there is still something in the patch, we reconcile
-	logger.Infof("controller will reconcile resource %q based on patch: %s", objectName, string(patch))
+	text := string(patch)
+	if patchContainsSensitiveData {
+		text = "[redacted patch details due to potentially sensitive content]"
+	}
+	logger.Infof("controller will reconcile resource %q based on patch: %s", objectName, text)
 
 	return true
+}
+
+func logErrorUnlessSensitive(msg string, err error, isSensitive bool) {
+	if isSensitive {
+		logger.Errorf("%s. [redacted error due to potentially sensitive content]", msg)
+	} else {
+		logger.Errorf("%s. %v", msg, err)
+	}
 }
 
 func isUpgrade(oldLabels, newLabels map[string]string) bool {
@@ -623,7 +650,6 @@ func isCMToIgnoreOnDelete(obj runtime.Object) bool {
 }
 
 func isSecretToIgnoreOnUpdate(obj runtime.Object) bool {
-	// If not a Secret, let's not reconcile
 	s, ok := obj.(*corev1.Secret)
 	if !ok {
 		return false

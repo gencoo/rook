@@ -1,10 +1,10 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -e
 
 ##################
 # INIT VARIABLES #
 ##################
-OLM_CATALOG_DIR=cluster/olm/ceph
+: "${OLM_CATALOG_DIR:=cluster/olm/ceph}"
 ASSEMBLE_FILE_COMMON="$OLM_CATALOG_DIR/assemble/metadata-common.yaml"
 ASSEMBLE_FILE_K8S="$OLM_CATALOG_DIR/assemble/metadata-k8s.yaml"
 ASSEMBLE_FILE_OCP="$OLM_CATALOG_DIR/assemble/metadata-ocp.yaml"
@@ -13,7 +13,7 @@ PACKAGE_FILE="$OLM_CATALOG_DIR/assemble/rook-ceph.package.yaml"
 SUPPORTED_PLATFORMS='k8s|ocp|okd'
 
 operator_sdk="${OPERATOR_SDK:-operator-sdk}"
-yq="${YQ_TOOL:-yq}"
+yq="${YQ:-yq}"
 
 # Default CSI to true
 : "${OLM_INCLUDE_CEPHFS_CSI:=true}"
@@ -76,6 +76,7 @@ ROOK_OP_VERSION=$3
 #############
 # VARIABLES #
 #############
+: "${SED_IN_PLACE:="build/sed-in-place"}"
 YQ_CMD_DELETE=($yq delete -i)
 YQ_CMD_MERGE_OVERWRITE=($yq merge --inplace --overwrite --prettyPrint)
 YQ_CMD_MERGE=($yq merge --inplace --append -P )
@@ -150,6 +151,9 @@ function generate_operator_yaml() {
     if [[ "$platform" == "ocp" ]]; then
         operator_file=$OPERATOR_YAML_FILE_OCP
     fi
+    if [[ "$platform" == "okd" ]]; then
+        operator_file=$OPERATOR_YAML_FILE_OCP
+    fi
 
     sed -n '/^# OLM: BEGIN OPERATOR DEPLOYMENT$/,/# OLM: END OPERATOR DEPLOYMENT$/p' "$operator_file" > "$OLM_OPERATOR_YAML_FILE"
 }
@@ -191,7 +195,6 @@ function generate_service_account_yaml() {
     sed -n '/^# OLM: BEGIN SERVICE ACCOUNT SYSTEM$/,/# OLM: END SERVICE ACCOUNT SYSTEM$/p' "$COMMON_YAML_FILE" > "$OLM_SERVICE_ACCOUNT_YAML_FILE"
     sed -n '/^# OLM: BEGIN SERVICE ACCOUNT OSD$/,/# OLM: END SERVICE ACCOUNT OSD$/p' "$COMMON_YAML_FILE" >> "$OLM_SERVICE_ACCOUNT_YAML_FILE"
     sed -n '/^# OLM: BEGIN SERVICE ACCOUNT MGR$/,/# OLM: END SERVICE ACCOUNT MGR$/p' "$COMMON_YAML_FILE" >> "$OLM_SERVICE_ACCOUNT_YAML_FILE"
-    sed -n '/^# OLM: BEGIN SERVICE ACCOUNT DEFAULT$/,/# OLM: END SERVICE ACCOUNT DEFAULT$/p' "$COMMON_YAML_FILE" >> "$OLM_SERVICE_ACCOUNT_YAML_FILE"
     if [ "$OLM_INCLUDE_CEPHFS_CSI" = true ]; then
         sed -n '/^# OLM: BEGIN CSI CEPHFS SERVICE ACCOUNT$/,/# OLM: END CSI CEPHFS SERVICE ACCOUNT$/p' "$COMMON_YAML_FILE" >> "$OLM_SERVICE_ACCOUNT_YAML_FILE"
     fi
@@ -222,26 +225,26 @@ function hack_csv() {
     # rook-ceph-osd --> serviceAccountName
     #     rook-ceph-osd --> rule
 
-    sed -i 's/rook-ceph-global/rook-ceph-system/' "$CSV_FILE_NAME"
-    sed -i 's/rook-ceph-object-bucket/rook-ceph-system/' "$CSV_FILE_NAME"
-    sed -i 's/rook-ceph-cluster-mgmt/rook-ceph-system/' "$CSV_FILE_NAME"
+    $SED_IN_PLACE 's/rook-ceph-global/rook-ceph-system/' "$CSV_FILE_NAME"
+    $SED_IN_PLACE 's/rook-ceph-object-bucket/rook-ceph-system/' "$CSV_FILE_NAME"
+    $SED_IN_PLACE 's/rook-ceph-cluster-mgmt/rook-ceph-system/' "$CSV_FILE_NAME"
 
-    sed -i 's/rook-ceph-mgr-cluster/rook-ceph-mgr/' "$CSV_FILE_NAME"
-    sed -i 's/rook-ceph-mgr-system/rook-ceph-mgr/' "$CSV_FILE_NAME"
+    $SED_IN_PLACE 's/rook-ceph-mgr-cluster/rook-ceph-mgr/' "$CSV_FILE_NAME"
+    $SED_IN_PLACE 's/rook-ceph-mgr-system/rook-ceph-mgr/' "$CSV_FILE_NAME"
 
-    sed -i 's/cephfs-csi-nodeplugin/rook-csi-cephfs-plugin-sa/' "$CSV_FILE_NAME"
-    sed -i 's/cephfs-external-provisioner-runner/rook-csi-cephfs-provisioner-sa/' "$CSV_FILE_NAME"
+    $SED_IN_PLACE 's/cephfs-csi-nodeplugin/rook-csi-cephfs-plugin-sa/' "$CSV_FILE_NAME"
+    $SED_IN_PLACE 's/cephfs-external-provisioner-runner/rook-csi-cephfs-provisioner-sa/' "$CSV_FILE_NAME"
 
-    sed -i 's/rbd-csi-nodeplugin/rook-csi-rbd-plugin-sa/' "$CSV_FILE_NAME"
-    sed -i 's/rbd-external-provisioner-runner/rook-csi-rbd-provisioner-sa/' "$CSV_FILE_NAME"
+    $SED_IN_PLACE 's/rbd-csi-nodeplugin/rook-csi-rbd-plugin-sa/' "$CSV_FILE_NAME"
+    $SED_IN_PLACE 's/rbd-external-provisioner-runner/rook-csi-rbd-provisioner-sa/' "$CSV_FILE_NAME"
     # The operator-sdk also does not properly respect when
     # Roles differ from the Service Account name
     # The operator-sdk instead assumes the Role/ClusterRole is the ServiceAccount name
     #
     # To account for these mappings, we have to replace Role/ClusterRole names with
     # the corresponding ServiceAccount.
-    sed -i 's/cephfs-external-provisioner-cfg/rook-csi-cephfs-provisioner-sa/' "$CSV_FILE_NAME"
-    sed -i 's/rbd-external-provisioner-cfg/rook-csi-rbd-provisioner-sa/' "$CSV_FILE_NAME"
+    $SED_IN_PLACE 's/cephfs-external-provisioner-cfg/rook-csi-cephfs-provisioner-sa/' "$CSV_FILE_NAME"
+    $SED_IN_PLACE 's/rbd-external-provisioner-cfg/rook-csi-rbd-provisioner-sa/' "$CSV_FILE_NAME"
 }
 
 function generate_package() {

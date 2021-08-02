@@ -33,9 +33,7 @@ import (
 	"github.com/coreos/pkg/capnslog"
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
-	"github.com/rook/rook/pkg/daemon/ceph/client"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	cephutil "github.com/rook/rook/pkg/daemon/ceph/util"
 	"github.com/rook/rook/pkg/operator/ceph/config"
@@ -235,7 +233,7 @@ func (c *Cluster) startMons(targetCount int) error {
 	// only once and do it as early as possible in the mon orchestration.
 	setConfigsNeedsRetry := false
 	if existingCount > 0 {
-		err := config.SetDefaultConfigs(c.context, c.ClusterInfo, c.spec)
+		err := config.SetOrRemoveDefaultConfigs(c.context, c.ClusterInfo, c.spec)
 		if err != nil {
 			// If we fail here, it could be because the mons are not healthy, and this might be
 			// fixed by updating the mon deployments. Instead of returning error here, log a
@@ -261,7 +259,7 @@ func (c *Cluster) startMons(targetCount int) error {
 			// values in the config database. Do this only when the existing count is zero so that
 			// this is only done once when the cluster is created.
 			if existingCount == 0 {
-				err := config.SetDefaultConfigs(c.context, c.ClusterInfo, c.spec)
+				err := config.SetOrRemoveDefaultConfigs(c.context, c.ClusterInfo, c.spec)
 				if err != nil {
 					return errors.Wrap(err, "failed to set Rook and/or user-defined Ceph config options after creating the first mon")
 				}
@@ -269,7 +267,7 @@ func (c *Cluster) startMons(targetCount int) error {
 				// Or if we need to retry, only do this when we are on the first iteration of the
 				// loop. This could be in the same if statement as above, but separate it to get a
 				// different error message.
-				err := config.SetDefaultConfigs(c.context, c.ClusterInfo, c.spec)
+				err := config.SetOrRemoveDefaultConfigs(c.context, c.ClusterInfo, c.spec)
 				if err != nil {
 					return errors.Wrap(err, "failed to set Rook and/or user-defined Ceph config options after updating the existing mons")
 				}
@@ -283,7 +281,7 @@ func (c *Cluster) startMons(targetCount int) error {
 		}
 
 		if setConfigsNeedsRetry {
-			err := config.SetDefaultConfigs(c.context, c.ClusterInfo, c.spec)
+			err := config.SetOrRemoveDefaultConfigs(c.context, c.ClusterInfo, c.spec)
 			if err != nil {
 				return errors.Wrap(err, "failed to set Rook and/or user-defined Ceph config options after forcefully updating the existing mons")
 			}
@@ -311,17 +309,13 @@ func (c *Cluster) startMons(targetCount int) error {
 }
 
 func (c *Cluster) configureStretchCluster(mons []*monConfig) error {
-	if err := c.assignStretchMonsToZones(mons); err != nil {
-		return errors.Wrap(err, "failed to assign mons to zones")
-	}
-
 	// Enable the mon connectivity strategy
-	if err := client.EnableStretchElectionStrategy(c.context, c.ClusterInfo); err != nil {
+	if err := cephclient.EnableStretchElectionStrategy(c.context, c.ClusterInfo); err != nil {
 		return errors.Wrap(err, "failed to enable stretch cluster")
 	}
 
 	// Create the default crush rule for stretch clusters, that by default will also apply to all pools
-	if err := client.CreateDefaultStretchCrushRule(c.context, c.ClusterInfo, &c.spec, c.stretchFailureDomainName()); err != nil {
+	if err := cephclient.CreateDefaultStretchCrushRule(c.context, c.ClusterInfo, &c.spec, c.stretchFailureDomainName()); err != nil {
 		return errors.Wrap(err, "failed to create default stretch rule")
 	}
 
@@ -344,51 +338,12 @@ func (c *Cluster) isArbiterZone(zone string) bool {
 	return c.getArbiterZone() == zone
 }
 
-func (c *Cluster) assignStretchMonsToZones(mons []*monConfig) error {
-	arbiterZone := c.getArbiterZone()
-
-	// Get the mon dump to see if the zones are already applied to the mons
-	monDump, err := client.GetMonDump(c.context, c.ClusterInfo)
-	if err != nil {
-		return errors.Wrap(err, "failed to detect if stretch mons are already assigned to zones")
-	}
-
-	// Set the location for each mon
-	domainName := c.stretchFailureDomainName()
-	for _, mon := range mons {
-		if mon.Zone == arbiterZone {
-			// remember the arbiter mon to be set later in the reconcile after the OSDs are configured
-			c.arbiterMon = mon.DaemonName
-		}
-		// Check if the zone is already set on the mon
-		alreadySet := false
-		for _, monInfo := range monDump.Mons {
-			if monInfo.Name == mon.DaemonName {
-				desiredLocation := fmt.Sprintf("{%s=%s}", domainName, mon.Zone)
-				if monInfo.CrushLocation == desiredLocation {
-					alreadySet = true
-				}
-				break
-			}
-		}
-		if alreadySet {
-			logger.Infof("mon %q stretch domain %q is already set to %q", mon.DaemonName, domainName, mon.Zone)
-			continue
-		}
-		logger.Infof("setting mon %q to stretch %s=%s", mon.DaemonName, domainName, mon.Zone)
-		if err := client.SetMonStretchZone(c.context, c.ClusterInfo, mon.DaemonName, domainName, mon.Zone); err != nil {
-			return errors.Wrapf(err, "failed to set mon %q zone", mon.DaemonName)
-		}
-	}
-	return nil
-}
-
 func (c *Cluster) ConfigureArbiter() error {
 	if c.arbiterMon == "" {
 		return errors.New("arbiter not specified for the stretch cluster")
 	}
 
-	monDump, err := client.GetMonDump(c.context, c.ClusterInfo)
+	monDump, err := cephclient.GetMonDump(c.context, c.ClusterInfo)
 	if err != nil {
 		logger.Warningf("attempting to enable arbiter after failed to detect if already enabled. %v", err)
 	} else if monDump.StretchMode {
@@ -411,7 +366,7 @@ func (c *Cluster) ConfigureArbiter() error {
 	}
 
 	// Set the mon tiebreaker
-	if err := client.SetMonStretchTiebreaker(c.context, c.ClusterInfo, c.arbiterMon, failureDomain); err != nil {
+	if err := cephclient.SetMonStretchTiebreaker(c.context, c.ClusterInfo, c.arbiterMon, failureDomain); err != nil {
 		return errors.Wrap(err, "failed to set mon tiebreaker")
 	}
 
@@ -434,7 +389,7 @@ func (c *Cluster) readyToConfigureArbiter(checkOSDPods bool) (bool, error) {
 		}
 	}
 
-	crushMap, err := client.GetCrushMap(c.context, c.ClusterInfo)
+	crushMap, err := cephclient.GetCrushMap(c.context, c.ClusterInfo)
 	if err != nil {
 		return false, errors.Wrap(err, "failed to get crush map")
 	}
@@ -501,11 +456,6 @@ func (c *Cluster) ensureMonsRunning(mons []*monConfig, i, targetCount int, requi
 	// save the mon config after we have "initiated the IPs"
 	if err := c.saveMonConfig(); err != nil {
 		return errors.Wrap(err, "failed to save mons")
-	}
-
-	// make sure we have the connection info generated so connections can happen
-	if err := WriteConnectionConfig(c.context, c.ClusterInfo); err != nil {
-		return err
 	}
 
 	// Start the deployment
@@ -585,8 +535,7 @@ func (c *Cluster) clusterInfoToMonConfig(excludedMon string) []*monConfig {
 			Port:         cephutil.GetPortFromEndpoint(monitor.Endpoint),
 			PublicIP:     cephutil.GetIPFromEndpoint(monitor.Endpoint),
 			Zone:         zone,
-			DataPathMap: config.NewStatefulDaemonDataPathMap(
-				c.spec.DataDirHostPath, dataDirRelativeHostPath(monitor.Name), config.MonType, monitor.Name, c.Namespace),
+			DataPathMap:  config.NewStatefulDaemonDataPathMap(c.spec.DataDirHostPath, dataDirRelativeHostPath(monitor.Name), config.MonType, monitor.Name, c.Namespace),
 		})
 	}
 	return mons
@@ -731,12 +680,12 @@ func scheduleMonitor(c *Cluster, mon *monConfig) (*apps.Deployment, error) {
 }
 
 // GetMonPlacement returns the placement for the MON service
-func (c *Cluster) getMonPlacement(zone string) rookv1.Placement {
+func (c *Cluster) getMonPlacement(zone string) cephv1.Placement {
 	// If the mon is the arbiter in a stretch cluster and its placement is specified, return it
 	// without merging with the "all" placement so it can be handled separately from all other daemons
 	if c.isArbiterZone(zone) {
 		p := cephv1.GetArbiterPlacement(c.spec.Placement)
-		noPlacement := rookv1.Placement{}
+		noPlacement := cephv1.Placement{}
 		if !reflect.DeepEqual(p, noPlacement) {
 			// If the arbiter placement was specified, go ahead and use it.
 			return p
@@ -753,6 +702,11 @@ func realWaitForMonitorScheduling(c *Cluster, d *apps.Deployment) (SchedulingRes
 
 	// wait for the scheduler to make a placement decision
 	for i := 0; i < canaryRetries; i++ {
+		// Check whether we need to cancel the orchestration
+		if err := controller.CheckForCancelledOrchestration(c.context); err != nil {
+			return result, err
+		}
+
 		if i > 0 {
 			time.Sleep(time.Second * canaryRetryDelaySeconds)
 		}
@@ -1020,7 +974,7 @@ func (c *Cluster) startDeployments(mons []*monConfig, requireAllInQuorum bool) e
 	// Final verification that **all** mons are in quorum
 	// Do not proceed if one monitor is still syncing
 	// Only do this when monitors versions are different so we don't block the orchestration if a mon is down.
-	versions, err := client.GetAllCephDaemonVersions(c.context, c.ClusterInfo)
+	versions, err := cephclient.GetAllCephDaemonVersions(c.context, c.ClusterInfo)
 	if err != nil {
 		logger.Warningf("failed to get ceph daemons versions; this likely means there is no cluster yet. %v", err)
 	} else {
@@ -1052,6 +1006,29 @@ func (c *Cluster) waitForMonsToJoin(mons []*monConfig, requireAllInQuorum bool) 
 }
 
 func (c *Cluster) saveMonConfig() error {
+	if err := c.persistExpectedMonDaemons(); err != nil {
+		return errors.Wrap(err, "failed to persist expected mons")
+	}
+
+	// Every time the mon config is updated, must also update the global config so that all daemons
+	// have the most updated version if they restart.
+	if err := config.GetStore(c.context, c.Namespace, c.ownerInfo).CreateOrUpdate(c.ClusterInfo); err != nil {
+		return errors.Wrap(err, "failed to update the global config")
+	}
+
+	// write the latest config to the config dir
+	if err := WriteConnectionConfig(c.context, c.ClusterInfo); err != nil {
+		return errors.Wrap(err, "failed to write connection config for new mons")
+	}
+
+	if err := csi.SaveClusterConfig(c.context.Clientset, c.Namespace, c.ClusterInfo, c.csiConfigMutex); err != nil {
+		return errors.Wrap(err, "failed to update csi cluster config")
+	}
+
+	return nil
+}
+
+func (c *Cluster) persistExpectedMonDaemons() error {
 	ctx := context.TODO()
 	configMap := &v1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1063,7 +1040,6 @@ func (c *Cluster) saveMonConfig() error {
 	if err != nil {
 		return errors.Wrapf(err, "failed to set owner reference mon configmap %q", configMap.Name)
 	}
-
 	monMapping, err := json.Marshal(c.mapping)
 	if err != nil {
 		return errors.Wrap(err, "failed to marshal mon mapping")
@@ -1102,24 +1078,7 @@ func (c *Cluster) saveMonConfig() error {
 			return errors.Wrap(err, "failed to update mon endpoint config map")
 		}
 	}
-
 	logger.Infof("saved mon endpoints to config map %+v", configMap.Data)
-
-	// Every time the mon config is updated, must also update the global config so that all daemons
-	// have the most updated version if they restart.
-	if err := config.GetStore(c.context, c.Namespace, c.ownerInfo).CreateOrUpdate(c.ClusterInfo); err != nil {
-		return errors.Wrap(err, "failed to update the global config")
-	}
-
-	// write the latest config to the config dir
-	if err := WriteConnectionConfig(c.context, c.ClusterInfo); err != nil {
-		return errors.Wrap(err, "failed to write connection config for new mons")
-	}
-
-	if err := csi.SaveClusterConfig(c.context.Clientset, c.Namespace, c.ClusterInfo, c.csiConfigMutex); err != nil {
-		return errors.Wrap(err, "failed to update csi cluster config")
-	}
-
 	return nil
 }
 
@@ -1175,6 +1134,20 @@ func (c *Cluster) commitMaxMonID(monName string) error {
 var updateDeploymentAndWait = UpdateCephDeploymentAndWait
 
 func (c *Cluster) updateMon(m *monConfig, d *apps.Deployment) error {
+	// Expand mon PVC if storage request for mon has increased in cephcluster crd
+	if c.monVolumeClaimTemplate(m) != nil {
+		desiredPvc, err := c.makeDeploymentPVC(m, false)
+		if err != nil {
+			return errors.Wrapf(err, "failed to make mon %q pvc", d.Name)
+		}
+
+		existingPvc, err := c.context.Clientset.CoreV1().PersistentVolumeClaims(c.Namespace).Get(context.TODO(), m.ResourceName, metav1.GetOptions{})
+		if err != nil {
+			return errors.Wrapf(err, "failed to fetch pvc for mon %q", m.ResourceName)
+		}
+		k8sutil.ExpandPVCIfRequired(c.context.Client, desiredPvc, existingPvc)
+	}
+
 	logger.Infof("deployment for mon %s already exists. updating if needed",
 		d.Name)
 
@@ -1283,7 +1256,8 @@ func (c *Cluster) startMon(m *monConfig, schedule *MonScheduleInfo) error {
 		return c.updateMon(m, d)
 	}
 
-	if c.monVolumeClaimTemplate(m) != nil {
+	monVolumeClaim := c.monVolumeClaimTemplate(m)
+	if monVolumeClaim != nil {
 		pvc, err := c.makeDeploymentPVC(m, false)
 		if err != nil {
 			return errors.Wrapf(err, "failed to make mon %s pvc", d.Name)
@@ -1298,15 +1272,18 @@ func (c *Cluster) startMon(m *monConfig, schedule *MonScheduleInfo) error {
 		}
 	}
 
-	if schedule == nil || schedule.Zone != "" {
-		k8sutil.SetNodeAntiAffinityForPod(&d.Spec.Template.Spec, requiredDuringScheduling(&c.spec), v1.LabelHostname,
-			map[string]string{k8sutil.AppAttr: AppName}, nil)
+	var nodeSelector map[string]string
+	if schedule == nil || (monVolumeClaim != nil && zone != "") {
+		// Schedule the mon according to placement settings, and allow it to be portable among nodes if allowed by the PV
+		nodeSelector = nil
 	} else {
+		// Schedule the mon on a specific host if specified, or else allow it to be portable according to the PV
 		p.PodAffinity = nil
 		p.PodAntiAffinity = nil
-		k8sutil.SetNodeAntiAffinityForPod(&d.Spec.Template.Spec, requiredDuringScheduling(&c.spec), v1.LabelHostname,
-			map[string]string{k8sutil.AppAttr: AppName}, map[string]string{v1.LabelHostname: schedule.Hostname})
+		nodeSelector = map[string]string{v1.LabelHostname: schedule.Hostname}
 	}
+	k8sutil.SetNodeAntiAffinityForPod(&d.Spec.Template.Spec, requiredDuringScheduling(&c.spec), v1.LabelHostname,
+		map[string]string{k8sutil.AppAttr: AppName}, nodeSelector)
 
 	logger.Debugf("Starting mon: %+v", d.Name)
 	_, err = c.context.Clientset.AppsV1().Deployments(c.Namespace).Create(ctx, d, metav1.CreateOptions{})
@@ -1317,6 +1294,12 @@ func (c *Cluster) startMon(m *monConfig, schedule *MonScheduleInfo) error {
 	// Commit the maxMonID after a mon deployment has been started (and not just scheduled)
 	if err := c.commitMaxMonID(m.DaemonName); err != nil {
 		return errors.Wrapf(err, "failed to commit maxMonId after starting mon %q", m.DaemonName)
+	}
+
+	// Persist the expected list of mons to the configmap in case the operator is interrupted before the mon failover is completed
+	// The config on disk won't be updated until the mon failover is completed
+	if err := c.persistExpectedMonDaemons(); err != nil {
+		return errors.Wrap(err, "failed to persist expected mon daemons")
 	}
 
 	return nil
@@ -1363,7 +1346,7 @@ func waitForQuorumWithMons(context *clusterd.Context, clusterInfo *cephclient.Cl
 
 		// get the quorum_status response that contains info about all monitors in the mon map and
 		// their quorum status
-		monQuorumStatusResp, err := client.GetMonQuorumStatus(context, clusterInfo)
+		monQuorumStatusResp, err := cephclient.GetMonQuorumStatus(context, clusterInfo)
 		if err != nil {
 			logger.Debugf("failed to get quorum_status. %v", err)
 			continue
@@ -1394,7 +1377,7 @@ func waitForQuorumWithMons(context *clusterd.Context, clusterInfo *cephclient.Cl
 	return nil
 }
 
-func logQuorumMembers(monQuorumStatusResp client.MonStatusResponse) {
+func logQuorumMembers(monQuorumStatusResp cephclient.MonStatusResponse) {
 	var monsInQuorum []string
 	for _, m := range monQuorumStatusResp.MonMap.Mons {
 		if monFoundInQuorum(m.Name, monQuorumStatusResp) {
@@ -1404,9 +1387,9 @@ func logQuorumMembers(monQuorumStatusResp client.MonStatusResponse) {
 	logger.Infof("Monitors in quorum: %v", monsInQuorum)
 }
 
-func monFoundInQuorum(name string, monQuorumStatusResp client.MonStatusResponse) bool {
+func monFoundInQuorum(name string, monQuorumStatusResp cephclient.MonStatusResponse) bool {
 	// first get the initial monitors corresponding mon map entry
-	var monMapEntry *client.MonMapEntry
+	var monMapEntry *cephclient.MonMapEntry
 	for i := range monQuorumStatusResp.MonMap.Mons {
 		if name == monQuorumStatusResp.MonMap.Mons[i].Name {
 			monMapEntry = &monQuorumStatusResp.MonMap.Mons[i]

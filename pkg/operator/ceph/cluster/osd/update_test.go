@@ -120,7 +120,7 @@ func Test_updateExistingOSDs(t *testing.T) {
 
 	// stub out the conditionExportFunc to do nothing. we do not have a fake Rook interface that
 	// allows us to interact with a CephCluster resource like the fake K8s clientset.
-	updateConditionFunc = func(c *clusterd.Context, namespaceName types.NamespacedName, conditionType cephv1.ConditionType, status corev1.ConditionStatus, reason cephv1.ClusterReasonType, message string) {
+	updateConditionFunc = func(c *clusterd.Context, namespaceName types.NamespacedName, conditionType cephv1.ConditionType, status corev1.ConditionStatus, reason cephv1.ConditionReason, message string) {
 		// do nothing
 	}
 	shouldCheckOkToStopFunc = func(context *clusterd.Context, clusterInfo *cephclient.ClusterInfo) bool {
@@ -142,21 +142,26 @@ func Test_updateExistingOSDs(t *testing.T) {
 		}
 
 	executor = &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(command string, outFileArg string, args ...string) (string, error) {
+		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
 			t.Logf("command: %s %v", command, args)
-			if fmt.Sprintf("%s %s %s", command, args[0], args[1]) != "ceph osd ok-to-stop" {
-				panic(fmt.Sprintf("unexpected command %q with args %v", command, args))
+			if args[0] == "osd" {
+				if args[1] == "ok-to-stop" {
+					queriedID := args[2]
+					if strconv.Itoa(osdToBeQueried) != queriedID {
+						err := errors.Errorf("OSD %d should have been queried, but %s was queried instead", osdToBeQueried, queriedID)
+						t.Error(err)
+						return "", err
+					}
+					if len(returnOkToStopIDs) > 0 {
+						return cephclientfake.OsdOkToStopOutput(osdToBeQueried, returnOkToStopIDs, true), nil
+					}
+					return cephclientfake.OsdOkToStopOutput(osdToBeQueried, []int{}, true), errors.Errorf("induced error")
+				}
+				if args[1] == "crush" && args[2] == "get-device-class" {
+					return cephclientfake.OSDDeviceClassOutput(args[3]), nil
+				}
 			}
-			queriedID := args[2]
-			if strconv.Itoa(osdToBeQueried) != queriedID {
-				err := errors.Errorf("OSD %d should have been queried, but %s was queried instead", osdToBeQueried, queriedID)
-				t.Error(err)
-				return "", err
-			}
-			if len(returnOkToStopIDs) > 0 {
-				return cephclientfake.OsdOkToStopOutput(osdToBeQueried, returnOkToStopIDs, true), nil
-			}
-			return cephclientfake.OsdOkToStopOutput(osdToBeQueried, []int{}, true), errors.Errorf("induced error")
+			panic(fmt.Sprintf("unexpected command %q with args %v", command, args))
 		},
 	}
 
@@ -477,7 +482,7 @@ func Test_updateExistingOSDs(t *testing.T) {
 
 func Test_getOSDUpdateInfo(t *testing.T) {
 	namespace := "rook-ceph"
-	cephImage := "ceph/ceph:v15"
+	cephImage := "quay.io/ceph/ceph:v15"
 
 	// NOTE: all tests share the same clientset
 	clientset := fake.NewSimpleClientset()

@@ -11,6 +11,7 @@ storage cluster.
 
 * [Prerequisites](#prerequisites)
 * [Using alternate namespaces](#using-alternate-namespaces)
+* [Deploying a second cluster](#deploying-a-second-cluster)
 * [Use custom Ceph user and secret for mounting](#use-custom-ceph-user-and-secret-for-mounting)
 * [Log Collection](#log-collection)
 * [OSD Information](#osd-information)
@@ -62,16 +63,29 @@ sed -i.bak \
 kubectl apply -f common.yaml -f operator.yaml -f cluster.yaml # add other files as desired for yourconfig
 ```
 
+## Deploying a second cluster
+
+If you wish to create a new CephCluster in a different namespace than `rook-ceph` while using a single operator to manage both clusters execute the following:
+
+```sh
+cd cluster/examples/kubernetes/ceph
+
+NAMESPACE=rook-ceph-secondary envsubst < common-second-cluster.yaml | kubectl create -f -
+```
+
+This will create all the necessary RBACs as well as the new namespace. The script assumes that `common.yaml` was already created.
+When you create the second CephCluster CR, use the same `NAMESPACE` and the operator will configure the second cluster.
+
 ## Use custom Ceph user and secret for mounting
 
-> **NOTE**: For extensive info about creating Ceph users, consult the Ceph documentation: http://docs.ceph.com/docs/mimic/rados/operations/user-management/#add-a-user.
+> **NOTE**: For extensive info about creating Ceph users, consult the Ceph documentation: https://docs.ceph.com/en/latest/rados/operations/user-management/#add-a-user.
 
 Using a custom Ceph user and secret can be done for filesystem and block storage.
 
-Create a custom user in Ceph with read-write access in the `/bar` directory on CephFS (For Ceph Mimic or newer, use `data=POOL_NAME` instead of `pool=POOL_NAME`):
+Create a custom user in Ceph with read-write access in the `/bar` directory on CephFS:
 
 ```console
-$ ceph auth get-or-create-key client.user1 mon 'allow r' osd 'allow rw tag cephfs pool=YOUR_FS_DATA_POOL' mds 'allow r, allow rw path=/bar'
+$ ceph auth get-or-create-key client.user1 mon 'allow r' osd 'allow rw tag cephfs data=YOUR_FS_DATA_POOL' mds 'allow r, allow rw path=/bar'
 ```
 
 The command will return a Ceph secret key, this key should be added as a secret in Kubernetes like this:
@@ -95,7 +109,7 @@ mountSecret: ceph-user1-secret
 
 If you want the Rook Ceph agent to require a `mountUser` and `mountSecret` to be set in StorageClasses using Rook, you must set the environment variable `AGENT_MOUNT_SECURITY_MODE` to `Restricted` on the Rook Ceph operator Deployment.
 
-For more information on using the Ceph feature to limit access to CephFS paths, see [Ceph Documentation - Path Restriction](http://docs.ceph.com/docs/mimic/cephfs/client-auth/#path-restriction).
+For more information on using the Ceph feature to limit access to CephFS paths, see [Ceph Documentation - Path Restriction](https://docs.ceph.com/en/latest/cephfs/client-auth/#path-restriction).
 
 ### ClusterRole
 
@@ -358,7 +372,7 @@ we would see the following defaults after creating a cluster:
 kubectl -n rook-ceph get ConfigMap rook-config-override -o yaml
 ```
 
-```console
+```yaml
 kind: ConfigMap
 apiVersion: v1
 metadata:

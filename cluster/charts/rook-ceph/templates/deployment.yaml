@@ -29,10 +29,6 @@ spec:
         env:
         - name: ROOK_CURRENT_NAMESPACE_ONLY
           value: {{ .Values.currentNamespaceOnly | quote }}
-{{- if not .Values.rbacEnable }}
-        - name: RBAC_ENABLED
-          value: "false"
-{{- end }}
 {{- if .Values.agent }}
 {{- if .Values.agent.toleration }}
         - name: AGENT_TOLERATION
@@ -120,6 +116,12 @@ spec:
           value: {{ .Values.csi.provisionerPriorityClassName | quote }}
         - name: CSI_ENABLE_OMAP_GENERATOR
           value: {{ .Values.csi.enableOMAPGenerator | quote }}
+        - name: CSI_ENABLE_VOLUME_REPLICATION
+          value: {{ .Values.csi.volumeReplication.enabled | quote }}
+{{- if .Values.csi.enableCSIHostNetwork }}
+        - name: CSI_ENABLE_HOST_NETWORK
+          value: {{ .Values.csi.enableCSIHostNetwork | quote }}
+{{- end }}
 {{- if .Values.csi.cephFSPluginUpdateStrategy }}
         - name: CSI_CEPHFS_PLUGIN_UPDATE_STRATEGY
           value: {{ .Values.csi.cephFSPluginUpdateStrategy | quote }}
@@ -178,6 +180,12 @@ spec:
           value: {{ .Values.csi.resizer.image | quote }}
 {{- end }}
 {{- end }}
+{{- if .Values.csi.volumeReplication }}
+{{- if .Values.csi.volumeReplication.image }}
+        - name: CSI_VOLUME_REPLICATION_IMAGE
+          value: {{ .Values.csi.volumeReplication.image | quote }}
+{{- end }}
+{{- end }}
 {{- if .Values.csi.cephfsPodLabels }}
         - name: ROOK_CSI_CEPHFS_POD_LABELS
           value: {{ .Values.csi.cephfsPodLabels | quote }}
@@ -194,6 +202,22 @@ spec:
         - name: CSI_PROVISIONER_NODE_AFFINITY
           value: {{ .Values.csi.provisionerNodeAffinity }}
 {{- end }}
+{{- if .Values.csi.rbdProvisionerTolerations }}
+        - name: CSI_RBD_PROVISIONER_TOLERATIONS
+          value: {{ toYaml .Values.csi.rbdProvisionerTolerations | quote }}
+{{- end }}
+{{- if .Values.csi.rbdProvisionerNodeAffinity }}
+        - name: CSI_RBD_PROVISIONER_NODE_AFFINITY
+          value: {{ .Values.csi.rbdProvisionerNodeAffinity }}
+{{- end }}
+{{- if .Values.csi.cephFSProvisionerTolerations }}
+        - name: CSI_CEPHFS_PROVISIONER_TOLERATIONS
+          value: {{ toYaml .Values.csi.cephFSProvisionerTolerations | quote }}
+{{- end }}
+{{- if .Values.csi.cephFSProvisionerNodeAffinity }}
+        - name: CSI_CEPHFS_PROVISIONER_NODE_AFFINITY
+          value: {{ .Values.csi.cephFSProvisionerNodeAffinity }}
+{{- end }}
 {{- if .Values.csi.allowUnsupportedVersion }}
         - name: ROOK_CSI_ALLOW_UNSUPPORTED_VERSION
           value: {{ .Values.csi.allowUnsupportedVersion | quote }}
@@ -205,6 +229,22 @@ spec:
 {{- if .Values.csi.pluginNodeAffinity }}
         - name: CSI_PLUGIN_NODE_AFFINITY
           value: {{ .Values.csi.pluginNodeAffinity }}
+{{- end }}
+{{- if .Values.csi.rbdPluginTolerations }}
+        - name: CSI_RBD_PLUGIN_TOLERATIONS
+          value: {{ toYaml .Values.csi.rbdPluginTolerations | quote }}
+{{- end }}
+{{- if .Values.csi.rbdPluginNodeAffinity }}
+        - name: CSI_RBD_PLUGIN_NODE_AFFINITY
+          value: {{ .Values.csi.rbdPluginNodeAffinity }}
+{{- end }}
+{{- if .Values.csi.cephFSPluginTolerations }}
+        - name: CSI_CEPHFS_PLUGIN_TOLERATIONS
+          value: {{ toYaml .Values.csi.cephFSPluginTolerations | quote }}
+{{- end }}
+{{- if .Values.csi.cephFSPluginNodeAffinity }}
+        - name: CSI_CEPHFS_PLUGIN_NODE_AFFINITY
+          value: {{ .Values.csi.cephFSPluginNodeAffinity }}
 {{- end }}
 {{- if .Values.csi.cephfsGrpcMetricsPort }}
         - name: CSI_CEPHFS_GRPC_METRICS_PORT
@@ -251,6 +291,8 @@ spec:
           value: "{{ .Values.enableFlexDriver }}"
         - name: ROOK_ENABLE_DISCOVERY_DAEMON
           value: "{{ .Values.enableDiscoveryDaemon }}"
+        - name: ROOK_CEPH_COMMANDS_TIMEOUT_SECONDS
+          value: "{{ .Values.cephCommandsTimeoutSeconds }}"
         - name: ROOK_OBC_WATCH_OPERATOR_NAMESPACE
           value: "{{ .Values.enableOBCWatchOperatorNamespace }}"
 
@@ -283,10 +325,6 @@ spec:
 {{- if .Values.resources }}
         resources:
 {{ toYaml .Values.resources | indent 10 }}
-{{- end }}
-{{- if .Values.allowMultipleFilesystems }}
-        - name: ROOK_ALLOW_MULTIPLE_FILESYSTEMS
-          value: {{ .Values.allowMultipleFilesystems | quote }}
 {{- end }}
 {{- if .Values.useOperatorHostNetwork }}
       hostNetwork: true

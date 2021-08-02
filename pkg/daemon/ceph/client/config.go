@@ -162,6 +162,12 @@ func mergeDefaultConfigWithRookConfigOverride(clusterdContext *clusterd.Context,
 		return errors.Wrapf(err, "failed to load config data from %q", k8sutil.ConfigOverrideName)
 	}
 
+	// Remove any debug message setting from the config file
+	// Debug messages will be printed on stdout, rendering the output of each command unreadable, especially json output
+	// This call is idempotent and will not fail if the debug message is not present
+	configFile.Section("global").DeleteKey("debug_ms")
+	configFile.Section("global").DeleteKey("debug ms")
+
 	return nil
 }
 
@@ -301,4 +307,32 @@ func WriteCephConfig(context *clusterd.Context, clusterInfo *ClusterInfo) error 
 		logger.Warningf("wrote and copied config file but failed to read it back from %s for logging. %v", DefaultConfigFilePath(), err)
 	}
 	return nil
+}
+
+// SetConfig applies a setting for a single mgr daemon
+func SetConfig(context *clusterd.Context, clusterInfo *ClusterInfo, daemonID string, key, val string, force bool) (bool, error) {
+	var getArgs, setArgs []string
+	getArgs = append(getArgs, "config", "get", daemonID, key)
+	if val == "" {
+		setArgs = append(setArgs, "config", "rm", daemonID, key)
+	} else {
+		setArgs = append(setArgs, "config", "set", daemonID, key, val)
+	}
+	if force {
+		setArgs = append(setArgs, "--force")
+	}
+
+	// Retrieve previous value to monitor changes
+	var prevVal string
+	buf, err := NewCephCommand(context, clusterInfo, getArgs).Run()
+	if err == nil {
+		prevVal = strings.TrimSpace(string(buf))
+	}
+
+	if _, err := NewCephCommand(context, clusterInfo, setArgs).Run(); err != nil {
+		return false, errors.Wrapf(err, "failed to set config key %s to %q", key, val)
+	}
+
+	hasChanged := prevVal != val
+	return hasChanged, nil
 }

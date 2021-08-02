@@ -24,7 +24,6 @@ import (
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/ceph/config/keyring"
 	"github.com/rook/rook/pkg/operator/ceph/controller"
-	cephcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
@@ -130,9 +129,8 @@ func (r *ReconcileCephNFS) makeDeployment(nfs *cephv1.CephNFS, cfg daemonConfig)
 			nfsConfigVol,
 			dbusVol,
 		},
-		HostNetwork:        r.cephClusterSpec.Network.IsHost(),
-		PriorityClassName:  nfs.Spec.Server.PriorityClassName,
-		ServiceAccountName: cephcontroller.DefaultServiceAccount,
+		HostNetwork:       r.cephClusterSpec.Network.IsHost(),
+		PriorityClassName: nfs.Spec.Server.PriorityClassName,
 	}
 	// Replace default unreachable node toleration
 	k8sutil.AddUnreachableNodeToleration(&podSpec)
@@ -152,8 +150,8 @@ func (r *ReconcileCephNFS) makeDeployment(nfs *cephv1.CephNFS, cfg daemonConfig)
 
 	if r.cephClusterSpec.Network.IsHost() {
 		podSpec.DNSPolicy = v1.DNSClusterFirstWithHostNet
-	} else if r.cephClusterSpec.Network.NetworkSpec.IsMultus() {
-		if err := k8sutil.ApplyMultus(r.cephClusterSpec.Network.NetworkSpec, &podTemplateSpec.ObjectMeta); err != nil {
+	} else if r.cephClusterSpec.Network.IsMultus() {
+		if err := k8sutil.ApplyMultus(r.cephClusterSpec.Network, &podTemplateSpec.ObjectMeta); err != nil {
 			return nil, err
 		}
 	}

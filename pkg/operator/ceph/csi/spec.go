@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	rookclient "github.com/rook/rook/pkg/client/clientset/versioned"
@@ -32,39 +33,40 @@ import (
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8scsi "k8s.io/api/storage/v1beta1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/version"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/typed/storage/v1beta1"
 )
 
 type Param struct {
-	CSIPluginImage               string
-	RegistrarImage               string
-	ProvisionerImage             string
-	AttacherImage                string
-	SnapshotterImage             string
-	ResizerImage                 string
-	DriverNamePrefix             string
-	EnableCSIGRPCMetrics         string
-	KubeletDirPath               string
-	ForceCephFSKernelClient      string
-	CephFSPluginUpdateStrategy   string
-	RBDPluginUpdateStrategy      string
-	PluginPriorityClassName      string
-	ProvisionerPriorityClassName string
-	EnableOMAPGenerator          bool
-	EnableRBDSnapshotter         bool
-	EnableCephFSSnapshotter      bool
-	LogLevel                     uint8
-	CephFSGRPCMetricsPort        uint16
-	CephFSLivenessMetricsPort    uint16
-	RBDGRPCMetricsPort           uint16
-	RBDLivenessMetricsPort       uint16
-	ProvisionerReplicas          uint8
-	CSICephFSPodLabels           map[string]string
-	CSIRBDPodLabels              map[string]string
+	CSIPluginImage                 string
+	RegistrarImage                 string
+	ProvisionerImage               string
+	AttacherImage                  string
+	SnapshotterImage               string
+	ResizerImage                   string
+	DriverNamePrefix               string
+	EnableCSIGRPCMetrics           string
+	KubeletDirPath                 string
+	ForceCephFSKernelClient        string
+	CephFSPluginUpdateStrategy     string
+	RBDPluginUpdateStrategy        string
+	PluginPriorityClassName        string
+	ProvisionerPriorityClassName   string
+	VolumeReplicationImage         string
+	EnableCSIHostNetwork           bool
+	EnableOMAPGenerator            bool
+	EnableRBDSnapshotter           bool
+	EnableCephFSSnapshotter        bool
+	EnableVolumeReplicationSideCar bool
+	LogLevel                       uint8
+	CephFSGRPCMetricsPort          uint16
+	CephFSLivenessMetricsPort      uint16
+	RBDGRPCMetricsPort             uint16
+	RBDLivenessMetricsPort         uint16
+	ProvisionerReplicas            uint8
+	CSICephFSPodLabels             map[string]string
+	CSIRBDPodLabels                map[string]string
 }
 
 type templateParam struct {
@@ -87,16 +89,17 @@ var (
 
 	// template paths
 	RBDPluginTemplatePath         string
-	RBDProvisionerSTSTemplatePath string
 	RBDProvisionerDepTemplatePath string
 
 	CephFSPluginTemplatePath         string
-	CephFSProvisionerSTSTemplatePath string
 	CephFSProvisionerDepTemplatePath string
 
 	// configuration map for csi
 	ConfigName = "rook-ceph-csi-config"
 	ConfigKey  = "csi-cluster-config-json"
+
+	csiLock      sync.Mutex
+	csiDriverobj csiDriver
 )
 
 // Specify default images as var instead of const so that they can be overridden with the Go
@@ -105,12 +108,13 @@ var (
 // manually challenging.
 var (
 	// image names
-	DefaultCSIPluginImage   = "quay.io/cephcsi/cephcsi:v3.2.1"
-	DefaultRegistrarImage   = "k8s.gcr.io/sig-storage/csi-node-driver-registrar:v2.0.1"
-	DefaultProvisionerImage = "k8s.gcr.io/sig-storage/csi-provisioner:v2.0.4"
-	DefaultAttacherImage    = "k8s.gcr.io/sig-storage/csi-attacher:v3.0.2"
-	DefaultSnapshotterImage = "k8s.gcr.io/sig-storage/csi-snapshotter:v3.0.2"
-	DefaultResizerImage     = "k8s.gcr.io/sig-storage/csi-resizer:v1.0.1"
+	DefaultCSIPluginImage         = "quay.io/cephcsi/cephcsi:v3.3.1"
+	DefaultRegistrarImage         = "k8s.gcr.io/sig-storage/csi-node-driver-registrar:v2.2.0"
+	DefaultProvisionerImage       = "k8s.gcr.io/sig-storage/csi-provisioner:v2.2.2"
+	DefaultAttacherImage          = "k8s.gcr.io/sig-storage/csi-attacher:v3.2.1"
+	DefaultSnapshotterImage       = "k8s.gcr.io/sig-storage/csi-snapshotter:v4.1.1"
+	DefaultResizerImage           = "k8s.gcr.io/sig-storage/csi-resizer:v1.2.0"
+	DefaultVolumeReplicationImage = "quay.io/csiaddons/volumereplication-operator:v0.1.0"
 )
 
 const (
@@ -118,12 +122,27 @@ const (
 	ProvDeploymentSuppVersion      = "14"
 	kubeMinVerForFilesystemRestore = "15"
 	kubeMinVerForBlockRestore      = "16"
+	kubeMinVerForSnapshot          = "17"
+	kubeMinVerForV1csiDriver       = "18"
+	kubeMaxVerForBeta1csiDriver    = "21"
 
-	// toleration and node affinity
+	// common tolerations and node affinity
 	provisionerTolerationsEnv  = "CSI_PROVISIONER_TOLERATIONS"
 	provisionerNodeAffinityEnv = "CSI_PROVISIONER_NODE_AFFINITY"
 	pluginTolerationsEnv       = "CSI_PLUGIN_TOLERATIONS"
 	pluginNodeAffinityEnv      = "CSI_PLUGIN_NODE_AFFINITY"
+
+	// CephFS tolerations and node affinity
+	cephFSProvisionerTolerationsEnv  = "CSI_CEPHFS_PROVISIONER_TOLERATIONS"
+	cephFSProvisionerNodeAffinityEnv = "CSI_CEPHFS_PROVISIONER_NODE_AFFINITY"
+	cephFSPluginTolerationsEnv       = "CSI_CEPHFS_PLUGIN_TOLERATIONS"
+	cephFSPluginNodeAffinityEnv      = "CSI_CEPHFS_PLUGIN_NODE_AFFINITY"
+
+	// RBD tolerations and node affinity
+	rbdProvisionerTolerationsEnv  = "CSI_RBD_PROVISIONER_TOLERATIONS"
+	rbdProvisionerNodeAffinityEnv = "CSI_RBD_PROVISIONER_NODE_AFFINITY"
+	rbdPluginTolerationsEnv       = "CSI_RBD_PLUGIN_TOLERATIONS"
+	rbdPluginNodeAffinityEnv      = "CSI_RBD_PLUGIN_NODE_AFFINITY"
 
 	// compute resource for CSI pods
 	rbdProvisionerResource = "CSI_RBD_PROVISIONER_RESOURCE"
@@ -171,7 +190,7 @@ func CSIEnabled() bool {
 	return EnableRBD || EnableCephFS
 }
 
-func ValidateCSIParam() error {
+func validateCSIParam() error {
 
 	if len(CSIParam.CSIPluginImage) == 0 {
 		return errors.New("missing csi rbd plugin image")
@@ -190,7 +209,7 @@ func ValidateCSIParam() error {
 		if len(RBDPluginTemplatePath) == 0 {
 			return errors.New("missing rbd plugin template path")
 		}
-		if len(RBDProvisionerSTSTemplatePath) == 0 && len(RBDProvisionerDepTemplatePath) == 0 {
+		if len(RBDProvisionerDepTemplatePath) == 0 {
 			return errors.New("missing rbd provisioner template path")
 		}
 	}
@@ -199,7 +218,7 @@ func ValidateCSIParam() error {
 		if len(CephFSPluginTemplatePath) == 0 {
 			return errors.New("missing cephfs plugin template path")
 		}
-		if len(CephFSProvisionerSTSTemplatePath) == 0 && len(CephFSProvisionerDepTemplatePath) == 0 {
+		if len(CephFSProvisionerDepTemplatePath) == 0 {
 			return errors.New("missing ceph provisioner template path")
 		}
 	}
@@ -227,6 +246,28 @@ func startDrivers(clientset kubernetes.Interface, rookclientset rookclient.Inter
 
 	CephFSDriverName = tp.DriverNamePrefix + "cephfs.csi.ceph.com"
 	RBDDriverName = tp.DriverNamePrefix + "rbd.csi.ceph.com"
+
+	csiDriverobj = beta1CsiDriver{}
+	if ver.Major > KubeMinMajor || ver.Major == KubeMinMajor && ver.Minor >= kubeMinVerForV1csiDriver {
+		csiDriverobj = v1CsiDriver{}
+		// In case of an k8s version upgrade, delete the beta CSIDriver object;
+		// before the creation of updated v1 object to avoid conflicts.
+		// Also, attempt betav1 driver object deletion only if version is less
+		// than maximum supported version for betav1 object.(unavailable in v1.22+)
+		// Ignore if not found.
+		if EnableRBD && ver.Minor <= kubeMaxVerForBeta1csiDriver {
+			err = beta1CsiDriver{}.deleteCSIDriverInfo(ctx, clientset, RBDDriverName)
+			if err != nil {
+				logger.Errorf("failed to delete %q Driver Info. %v", RBDDriverName, err)
+			}
+		}
+		if EnableCephFS && ver.Minor <= kubeMaxVerForBeta1csiDriver {
+			err = beta1CsiDriver{}.deleteCSIDriverInfo(ctx, clientset, CephFSDriverName)
+			if err != nil {
+				logger.Errorf("failed to delete %q Driver Info. %v", CephFSDriverName, err)
+			}
+		}
+	}
 
 	tp.EnableCSIGRPCMetrics = fmt.Sprintf("%t", EnableCSIGRPCMetrics)
 
@@ -286,8 +327,12 @@ func startDrivers(clientset kubernetes.Interface, rookclientset rookclient.Inter
 	if strings.EqualFold(enableOMAPGenerator, "true") {
 		tp.EnableOMAPGenerator = true
 	}
-	// enable RBD snapshotter by default
-	tp.EnableRBDSnapshotter = true
+
+	// if k8s >= v1.17 enable RBD and CephFS snapshotter by default
+	if ver.Major == KubeMinMajor && ver.Minor >= kubeMinVerForSnapshot {
+		tp.EnableRBDSnapshotter = true
+		tp.EnableCephFSSnapshotter = true
+	}
 	enableRBDSnapshotter, err := k8sutil.GetOperatorSetting(clientset, controllerutil.OperatorSettingConfigMapName, "CSI_ENABLE_RBD_SNAPSHOTTER", "true")
 	if err != nil {
 		return errors.Wrap(err, "failed to load CSI_ENABLE_RBD_SNAPSHOTTER setting")
@@ -295,14 +340,21 @@ func startDrivers(clientset kubernetes.Interface, rookclientset rookclient.Inter
 	if strings.EqualFold(enableRBDSnapshotter, "false") {
 		tp.EnableRBDSnapshotter = false
 	}
-	// enable CephFS snapshotter by default
-	tp.EnableCephFSSnapshotter = true
 	enableCephFSSnapshotter, err := k8sutil.GetOperatorSetting(clientset, controllerutil.OperatorSettingConfigMapName, "CSI_ENABLE_CEPHFS_SNAPSHOTTER", "true")
 	if err != nil {
 		return errors.Wrap(err, "failed to load CSI_ENABLE_CEPHFS_SNAPSHOTTER setting")
 	}
 	if strings.EqualFold(enableCephFSSnapshotter, "false") {
 		tp.EnableCephFSSnapshotter = false
+	}
+
+	tp.EnableVolumeReplicationSideCar = false
+	enableVolumeReplicationSideCar, err := k8sutil.GetOperatorSetting(clientset, controllerutil.OperatorSettingConfigMapName, "CSI_ENABLE_VOLUME_REPLICATION", "false")
+	if err != nil {
+		return errors.Wrap(err, "failed to load CSI_ENABLE_VOLUME_REPLICATION setting")
+	}
+	if strings.EqualFold(enableVolumeReplicationSideCar, "true") {
+		tp.EnableVolumeReplicationSideCar = true
 	}
 
 	updateStrategy, err := k8sutil.GetOperatorSetting(clientset, controllerutil.OperatorSettingConfigMapName, "CSI_CEPHFS_PLUGIN_UPDATE_STRATEGY", rollingUpdate)
@@ -404,14 +456,19 @@ func startDrivers(clientset kubernetes.Interface, rookclientset rookclient.Inter
 		logger.Info("successfully started CSI CephFS driver")
 	}
 
-	// get provisioner toleration and node affinity
-	provisionerTolerations := getToleration(clientset, true)
-	provisionerNodeAffinity := getNodeAffinity(clientset, true)
-	// get plugin toleration and node affinity
-	pluginTolerations := getToleration(clientset, false)
-	pluginNodeAffinity := getNodeAffinity(clientset, false)
+	// get common provisioner tolerations and node affinity
+	provisionerTolerations := getToleration(clientset, provisionerTolerationsEnv, []corev1.Toleration{})
+	provisionerNodeAffinity := getNodeAffinity(clientset, provisionerNodeAffinityEnv, &corev1.NodeAffinity{})
+	// get common plugin tolerations and node affinity
+	pluginTolerations := getToleration(clientset, pluginTolerationsEnv, []corev1.Toleration{})
+	pluginNodeAffinity := getNodeAffinity(clientset, pluginNodeAffinityEnv, &corev1.NodeAffinity{})
+
 	if rbdPlugin != nil {
-		applyToPodSpec(&rbdPlugin.Spec.Template.Spec, pluginNodeAffinity, pluginTolerations)
+		// get RBD plugin tolerations and node affinity, defaults to common tolerations and node affinity if not specified
+		rbdPluginTolerations := getToleration(clientset, rbdPluginTolerationsEnv, pluginTolerations)
+		rbdPluginNodeAffinity := getNodeAffinity(clientset, rbdPluginNodeAffinityEnv, pluginNodeAffinity)
+		// apply RBD plugin tolerations and node affinity
+		applyToPodSpec(&rbdPlugin.Spec.Template.Spec, rbdPluginNodeAffinity, rbdPluginTolerations)
 		// apply resource request and limit to rbdplugin containers
 		applyResourcesToContainers(clientset, rbdPluginResource, &rbdPlugin.Spec.Template.Spec)
 		err = ownerInfo.SetControllerReference(rbdPlugin)
@@ -433,7 +490,11 @@ func startDrivers(clientset kubernetes.Interface, rookclientset rookclient.Inter
 	}
 
 	if rbdProvisionerDeployment != nil {
-		applyToPodSpec(&rbdProvisionerDeployment.Spec.Template.Spec, provisionerNodeAffinity, provisionerTolerations)
+		// get RBD provisioner tolerations and node affinity, defaults to common tolerations and node affinity if not specified
+		rbdProvisionerTolerations := getToleration(clientset, rbdProvisionerTolerationsEnv, provisionerTolerations)
+		rbdProvisionerNodeAffinity := getNodeAffinity(clientset, rbdProvisionerNodeAffinityEnv, provisionerNodeAffinity)
+		// apply RBD provisioner tolerations and node affinity
+		applyToPodSpec(&rbdProvisionerDeployment.Spec.Template.Spec, rbdProvisionerNodeAffinity, rbdProvisionerTolerations)
 		// apply resource request and limit to rbd provisioner containers
 		applyResourcesToContainers(clientset, rbdProvisionerResource, &rbdProvisionerDeployment.Spec.Template.Spec)
 		err = ownerInfo.SetControllerReference(rbdProvisionerDeployment)
@@ -470,7 +531,11 @@ func startDrivers(clientset kubernetes.Interface, rookclientset rookclient.Inter
 	}
 
 	if cephfsPlugin != nil {
-		applyToPodSpec(&cephfsPlugin.Spec.Template.Spec, pluginNodeAffinity, pluginTolerations)
+		// get CephFS plugin tolerations and node affinity, defaults to common tolerations and node affinity if not specified
+		cephFSPluginTolerations := getToleration(clientset, cephFSPluginTolerationsEnv, pluginTolerations)
+		cephFSPluginNodeAffinity := getNodeAffinity(clientset, cephFSPluginNodeAffinityEnv, pluginNodeAffinity)
+		// apply CephFS plugin tolerations and node affinity
+		applyToPodSpec(&cephfsPlugin.Spec.Template.Spec, cephFSPluginNodeAffinity, cephFSPluginTolerations)
 		// apply resource request and limit to cephfs plugin containers
 		applyResourcesToContainers(clientset, cephFSPluginResource, &cephfsPlugin.Spec.Template.Spec)
 		err = ownerInfo.SetControllerReference(cephfsPlugin)
@@ -492,7 +557,11 @@ func startDrivers(clientset kubernetes.Interface, rookclientset rookclient.Inter
 	}
 
 	if cephfsProvisionerDeployment != nil {
-		applyToPodSpec(&cephfsProvisionerDeployment.Spec.Template.Spec, provisionerNodeAffinity, provisionerTolerations)
+		// get CephFS provisioner tolerations and node affinity, defaults to common tolerations and node affinity if not specified
+		cephFSProvisionerTolerations := getToleration(clientset, cephFSProvisionerTolerationsEnv, provisionerTolerations)
+		cephFSProvisionerNodeAffinity := getNodeAffinity(clientset, cephFSProvisionerNodeAffinityEnv, provisionerNodeAffinity)
+		// apply CephFS provisioner tolerations and node affinity
+		applyToPodSpec(&cephfsProvisionerDeployment.Spec.Template.Spec, cephFSProvisionerNodeAffinity, cephFSProvisionerTolerations)
 		// get resource details for cephfs provisioner
 		// apply resource request and limit to cephfs provisioner containers
 		applyResourcesToContainers(clientset, cephFSProvisionerResource, &cephfsProvisionerDeployment.Spec.Template.Spec)
@@ -533,7 +602,7 @@ func startDrivers(clientset kubernetes.Interface, rookclientset rookclient.Inter
 			// logging a warning and intentionally continuing with the default log level
 			logger.Warningf("failed to parse CSI_RBD_FSGROUPPOLICY. Defaulting to %q. %v", k8scsi.ReadWriteOnceWithFSTypeFSGroupPolicy, err)
 		}
-		err = createCSIDriverInfo(ctx, clientset, RBDDriverName, fsGroupPolicyForRBD)
+		err = csiDriverobj.createCSIDriverInfo(ctx, clientset, RBDDriverName, fsGroupPolicyForRBD)
 		if err != nil {
 			return errors.Wrapf(err, "failed to create CSI driver object for %q", RBDDriverName)
 		}
@@ -545,7 +614,7 @@ func startDrivers(clientset kubernetes.Interface, rookclientset rookclient.Inter
 			// log level
 			logger.Warningf("failed to parse CSI_CEPHFS_FSGROUPPOLICY. Defaulting to %q. %v", k8scsi.ReadWriteOnceWithFSTypeFSGroupPolicy, err)
 		}
-		err = createCSIDriverInfo(ctx, clientset, CephFSDriverName, fsGroupPolicyForCephFS)
+		err = csiDriverobj.createCSIDriverInfo(ctx, clientset, CephFSDriverName, fsGroupPolicyForCephFS)
 		if err != nil {
 			return errors.Wrapf(err, "failed to create CSI driver object for %q", CephFSDriverName)
 		}
@@ -580,6 +649,10 @@ func deleteCSIDriverResources(
 	clientset kubernetes.Interface, ver *version.Info, namespace, daemonset, deployment, service, driverName string) bool {
 	ctx := context.TODO()
 	succeeded := true
+	csiDriverobj = beta1CsiDriver{}
+	if ver.Major > KubeMinMajor || ver.Major == KubeMinMajor && ver.Minor >= kubeMinVerForV1csiDriver {
+		csiDriverobj = v1CsiDriver{}
+	}
 	err := k8sutil.DeleteDaemonset(clientset, namespace, daemonset)
 	if err != nil {
 		logger.Errorf("failed to delete the %q. %v", daemonset, err)
@@ -598,7 +671,7 @@ func deleteCSIDriverResources(
 		succeeded = false
 	}
 
-	err = deleteCSIDriverInfo(ctx, clientset, driverName)
+	err = csiDriverobj.deleteCSIDriverInfo(ctx, clientset, driverName)
 	if err != nil {
 		logger.Errorf("failed to delete %q Driver Info. %v", driverName, err)
 		succeeded = false
@@ -614,7 +687,7 @@ func applyCephClusterNetworkConfig(ctx context.Context, objectMeta *metav1.Objec
 	}
 	for _, cephCluster := range cephClusters.Items {
 		if cephCluster.Spec.Network.IsMultus() {
-			err = k8sutil.ApplyMultus(cephCluster.Spec.Network.NetworkSpec, objectMeta)
+			err = k8sutil.ApplyMultus(cephCluster.Spec.Network, objectMeta)
 			if err != nil {
 				return false, errors.Wrapf(err, "failed to apply multus configuration to CephCluster %q", cephCluster.Name)
 			}
@@ -623,79 +696,6 @@ func applyCephClusterNetworkConfig(ctx context.Context, objectMeta *metav1.Objec
 	}
 
 	return isMultusApplied, nil
-}
-
-// createCSIDriverInfo Registers CSI driver by creating a CSIDriver object
-func createCSIDriverInfo(ctx context.Context, clientset kubernetes.Interface, name, fsGroupPolicy string) error {
-	attach := true
-	mountInfo := false
-	// Create CSIDriver object
-	csiDriver := &k8scsi.CSIDriver{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-		},
-		Spec: k8scsi.CSIDriverSpec{
-			AttachRequired: &attach,
-			PodInfoOnMount: &mountInfo,
-		},
-	}
-	if fsGroupPolicy != "" {
-		policy := k8scsi.FSGroupPolicy(fsGroupPolicy)
-		csiDriver.Spec.FSGroupPolicy = &policy
-	}
-	csidrivers := clientset.StorageV1beta1().CSIDrivers()
-	driver, err := csidrivers.Get(ctx, name, metav1.GetOptions{})
-	if err == nil {
-		// As FSGroupPolicy field is immutable, should be set only during create time.
-		// if the request is to change the FSGroupPolicy, we are deleting the CSIDriver object and creating it.
-		if driver.Spec.FSGroupPolicy != nil && csiDriver.Spec.FSGroupPolicy != nil && *driver.Spec.FSGroupPolicy != *csiDriver.Spec.FSGroupPolicy {
-			return reCreateCSIDriverInfo(ctx, csidrivers, csiDriver)
-		}
-
-		// For csidriver we need to provide the resourceVersion when updating the object.
-		// From the docs (https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#metadata)
-		// > "This value MUST be treated as opaque by clients and passed unmodified back to the server"
-		csiDriver.ObjectMeta.ResourceVersion = driver.ObjectMeta.ResourceVersion
-		_, err = csidrivers.Update(ctx, csiDriver, metav1.UpdateOptions{})
-		if err == nil {
-			logger.Infof("CSIDriver object updated for driver %q", name)
-		}
-		return err
-	}
-
-	if apierrors.IsNotFound(err) {
-		_, err = csidrivers.Create(ctx, csiDriver, metav1.CreateOptions{})
-		if err == nil {
-			logger.Infof("CSIDriver object created for driver %q", name)
-		}
-	}
-
-	return err
-}
-
-func reCreateCSIDriverInfo(ctx context.Context, csiClient v1beta1.CSIDriverInterface, csiDriver *k8scsi.CSIDriver) error {
-	err := csiClient.Delete(ctx, csiDriver.Name, metav1.DeleteOptions{})
-	if err != nil {
-		return errors.Wrapf(err, "failed to delete CSIDriver object for driver %q", csiDriver.Name)
-	}
-	logger.Infof("CSIDriver object deleted for driver %q", csiDriver.Name)
-	_, err = csiClient.Create(ctx, csiDriver, metav1.CreateOptions{})
-	if err != nil {
-		return errors.Wrapf(err, "failed to recreate CSIDriver object for driver %q", csiDriver.Name)
-	}
-	logger.Infof("CSIDriver object recreated for driver %q", csiDriver.Name)
-	return nil
-}
-
-// deleteCSIDriverInfo deletes CSIDriverInfo and returns the error if any
-func deleteCSIDriverInfo(ctx context.Context, clientset kubernetes.Interface, name string) error {
-	err := clientset.StorageV1beta1().CSIDrivers().Delete(ctx, name, metav1.DeleteOptions{})
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-	}
-	return err
 }
 
 // ValidateCSIVersion checks if the configured ceph-csi image is supported
@@ -719,7 +719,7 @@ func validateCSIVersion(clientset kubernetes.Interface, namespace, rookImage, se
 	job.Spec.Template.Spec.ServiceAccountName = serviceAccountName
 
 	// Apply csi provisioner toleration for csi version check job
-	job.Spec.Template.Spec.Tolerations = getToleration(clientset, true)
+	job.Spec.Template.Spec.Tolerations = getToleration(clientset, provisionerTolerationsEnv, []corev1.Toleration{})
 	stdout, _, retcode, err := versionReporter.Run(timeout)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to complete ceph CSI version job")

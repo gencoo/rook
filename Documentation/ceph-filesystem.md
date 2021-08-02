@@ -9,7 +9,7 @@ indent: true
 
 A shared filesystem can be mounted with read/write permission from multiple pods. This may be useful for applications which can be clustered using a shared filesystem.
 
-This example runs a shared filesystem for the [kube-registry](https://github.com/kubernetes/kubernetes/tree/master/cluster/addons/registry).
+This example runs a shared filesystem for the [kube-registry](https://github.com/kubernetes/kubernetes/tree/release-1.9/cluster/addons/registry).
 
 ## Prerequisites
 
@@ -122,25 +122,6 @@ Create the storage class.
 
 ```console
 kubectl create -f cluster/examples/kubernetes/ceph/csi/cephfs/storageclass.yaml
-```
-
-## Mirroring
-
-Since Ceph Pacific, CephFS supports asynchronous replication of snapshots to a remote CephFS file system via cephfs-mirror tool. Snapshots are synchronized by mirroring snapshot data followed by creating a snapshot with the same name (for a given directory on the remote file system) as the snapshot being synchronized.
-It is generally useful when planning for Disaster Recovery.
-For clusters that are geographically distributed and stretching is not possible due to high latencies.
-
-```yaml
-apiVersion: ceph.rook.io/v1
-kind: CephFilesystem
-metadata:
-  name: myfs
-  namespace: rook-ceph
-spec:
-...
-...
-  mirroring:
-    enabled: true
 ```
 
 ## Quotas

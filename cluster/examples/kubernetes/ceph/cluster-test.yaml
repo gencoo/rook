@@ -17,6 +17,8 @@ data:
     [global]
     osd_pool_default_size = 1
     mon_warn_on_pool_no_redundancy = false
+    bdev_flock_retry = 20
+    bluefs_buffered_io = false
 ---
 apiVersion: ceph.rook.io/v1
 kind: CephCluster
@@ -26,7 +28,7 @@ metadata:
 spec:
   dataDirHostPath: /var/lib/rook
   cephVersion:
-    image: ceph/ceph:v15
+    image: quay.io/ceph/ceph:v16
     allowUnsupported: true
   mon:
     count: 1

@@ -25,11 +25,9 @@ import (
 	"github.com/kube-object-storage/lib-bucket-provisioner/pkg/provisioner"
 	apibkt "github.com/kube-object-storage/lib-bucket-provisioner/pkg/provisioner/api"
 	"github.com/pkg/errors"
-	v1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
@@ -88,22 +86,22 @@ func (p *Provisioner) getObjectStore() (*cephv1.CephObjectStore, error) {
 		if kerrors.IsNotFound(err) {
 			return nil, errors.Wrap(err, "cephObjectStore not found")
 		}
-		return nil, errors.Wrap(err, "error getting cephObjectStore")
+		return nil, errors.Wrapf(err, "failed to get ceph object store %q", p.objectStoreName)
 	}
 	return store, err
 }
 
-func getService(c kubernetes.Interface, namespace, name string) (*v1.Service, error) {
-	ctx := context.TODO()
-	// Verify the object store's service actually exists
-	svc, err := c.CoreV1().Services(namespace).Get(ctx, name, metav1.GetOptions{})
+func (p *Provisioner) getCephCluster() (*cephv1.CephCluster, error) {
+	cephCluster, err := p.context.RookClientset.CephV1().CephClusters(p.clusterInfo.Namespace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
-		if kerrors.IsNotFound(err) {
-			return nil, errors.Wrap(err, "cephObjectStore service not found")
-		}
-		return nil, errors.Wrap(err, "error getting cephObjectStore service")
+		return nil, errors.Wrapf(err, "failed to list ceph clusters in namespace %q", p.clusterInfo.Namespace)
 	}
-	return svc, nil
+	if len(cephCluster.Items) == 0 {
+		return nil, errors.Errorf("failed to find ceph cluster in namespace %q", p.clusterInfo.Namespace)
+	}
+
+	// This is a bit weak, but there will always be a single cluster per namespace anyway
+	return &cephCluster.Items[0], err
 }
 
 func randomString(n int) string {

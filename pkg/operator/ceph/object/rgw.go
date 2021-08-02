@@ -20,7 +20,10 @@ package object
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
+	"net/http"
 	"reflect"
+	"syscall"
 
 	"github.com/banzaicloud/k8s-objectmatcher/patch"
 	"github.com/pkg/errors"
@@ -31,6 +34,8 @@ import (
 	"github.com/rook/rook/pkg/operator/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/pool"
 	"github.com/rook/rook/pkg/operator/k8sutil"
+	"github.com/rook/rook/pkg/util/exec"
+	v1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -85,6 +90,10 @@ func (c *clusterConfig) startRGWPods(realmName, zoneGroupName, zoneName string) 
 
 	// start a new deployment and scale up
 	desiredRgwInstances := int(c.store.Spec.Gateway.Instances)
+	// If running on Pacific we force a single deployment and later set the deployment replica to the "instances" value
+	if c.clusterInfo.CephVersion.IsAtLeastPacific() {
+		desiredRgwInstances = 1
+	}
 	for i := 0; i < desiredRgwInstances; i++ {
 		var err error
 
@@ -109,17 +118,19 @@ func (c *clusterConfig) startRGWPods(realmName, zoneGroupName, zoneName string) 
 			return errors.Wrap(err, "failed to create rgw keyring")
 		}
 
-		// Check for existing deployment and set the daemon config flags
-		_, err = c.context.Clientset.AppsV1().Deployments(c.store.Namespace).Get(ctx, rgwConfig.ResourceName, metav1.GetOptions{})
-		// We don't need to handle any error here
+		// Set the rgw config flags
+		// Previously we were checking if the deployment was present, if not we would set the config flags
+		// Which means that we would only set the flag on newly created CephObjectStore CR
+		// Unfortunately, on upgrade we would not set the flags which is not ideal for old clusters where we were no setting those flags
+		// The KV supports setting those flags even if the RGW is running
+		logger.Info("setting rgw config flags")
+		err = c.setDefaultFlagsMonConfigStore(rgwConfig.ResourceName)
 		if err != nil {
-			// Apply the flag only when the deployment is not found
-			if kerrors.IsNotFound(err) {
-				logger.Info("setting rgw config flags")
-				err = c.setDefaultFlagsMonConfigStore(rgwConfig.ResourceName)
-				if err != nil {
-					return errors.Wrap(err, "failed to set default rgw config options")
-				}
+			// Getting EPERM typically happens when the flag may not be modified at runtime
+			// This is fine to ignore
+			code, ok := exec.ExitStatus(err)
+			if ok && code != int(syscall.EPERM) {
+				return errors.Wrap(err, "failed to set default rgw config options")
 			}
 		}
 
@@ -301,11 +312,54 @@ func BuildDomainName(name, namespace string) string {
 	return fmt.Sprintf("%s-%s.%s.%s", AppName, name, namespace, svcDNSSuffix)
 }
 
-// buildDNSEndpoint build the dns name to reach out the service endpoint
-func buildDNSEndpoint(domainName string, port int32, secure bool) string {
+// BuildDNSEndpoint build the dns name to reach out the service endpoint
+func BuildDNSEndpoint(domainName string, port int32, secure bool) string {
 	httpPrefix := "http"
 	if secure {
 		httpPrefix = "https"
 	}
 	return fmt.Sprintf("%s://%s:%d", httpPrefix, domainName, port)
+}
+
+// GetTLSCACert fetch cacert for internal RGW requests
+func GetTlsCaCert(objContext *Context, objectStoreSpec *cephv1.ObjectStoreSpec) ([]byte, error) {
+	ctx := context.TODO()
+	var (
+		tlsCert []byte
+		err     error
+	)
+
+	if objectStoreSpec.Gateway.SSLCertificateRef != "" {
+		tlsSecretCert, err := objContext.Context.Clientset.CoreV1().Secrets(objContext.clusterInfo.Namespace).Get(ctx, objectStoreSpec.Gateway.SSLCertificateRef, metav1.GetOptions{})
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to get secret %s containing TLS certificate defined in %s", objectStoreSpec.Gateway.SSLCertificateRef, objContext.Name)
+		}
+		if tlsSecretCert.Type == v1.SecretTypeOpaque {
+			tlsCert = tlsSecretCert.Data[certKeyName]
+		} else if tlsSecretCert.Type == v1.SecretTypeTLS {
+			tlsCert = tlsSecretCert.Data[v1.TLSCertKey]
+		}
+	} else if objectStoreSpec.GetServiceServingCert() != "" {
+		tlsCert, err = ioutil.ReadFile(ServiceServingCertCAFile)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to fetch TLS certificate from %q", ServiceServingCertCAFile)
+		}
+	}
+
+	return tlsCert, nil
+}
+
+func GenObjectStoreHTTPClient(objContext *Context, spec *cephv1.ObjectStoreSpec) (*http.Client, []byte, error) {
+	nsName := fmt.Sprintf("%s/%s", objContext.clusterInfo.Namespace, objContext.Name)
+	c := &http.Client{}
+	tlsCert := []byte{}
+	if spec.IsTLSEnabled() {
+		var err error
+		tlsCert, err = GetTlsCaCert(objContext, spec)
+		if err != nil {
+			return nil, tlsCert, errors.Wrapf(err, "failed to fetch CA cert to establish TLS connection with object store %q", nsName)
+		}
+		c.Transport = BuildTransportTLS(tlsCert)
+	}
+	return c, tlsCert, nil
 }

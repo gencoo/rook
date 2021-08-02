@@ -66,6 +66,19 @@ and it is safe to proceed. If an OSD is failing, the PGs will not be perfectly c
 Update your CephCluster CR. Depending on your CR settings, you may need to remove the device from the list or update the device filter.
 If you are using `useAllDevices: true`, no change to the CR is necessary.
 
+**IMPORTANT: On host-based clusters, you may need to stop the Rook Operator while performing OSD
+removal steps in order to prevent Rook from detecting the old OSD and trying to re-create it before
+the disk is wiped or removed.**
+
+To stop the Rook Operator, run 
+`kubectl -n rook-ceph scale deployment rook-ceph-operator --replicas=0`.
+
+You must perform steps below to (1) purge the OSD and either (2.a) delete the underlying data or 
+(2.b)replace the disk before starting the Rook Operator again.
+
+Once you have done that, you can start the Rook operator again with
+`kubectl -n rook-ceph scale deployment rook-ceph-operator --replicas=1`.
+
 ### PVC-based cluster
 
 To reduce the storage in your cluster or remove a failed OSD on a PVC:
@@ -106,13 +119,15 @@ If you want to remove OSDs by hand, continue with the following sections. Howeve
 
 If the OSD purge job fails or you need fine-grained control of the removal, here are the individual commands that can be run from the toolbox.
 
-1. Mark the OSD as `out` if not already marked as such by Ceph. This signals Ceph to start moving (backfilling) the data that was on that OSD to another OSD.
+1. Detach the OSD PVC from Rook
+   - `kubectl -n rook-ceph label pvc <orphaned-pvc> ceph.rook.io/DeviceSetPVCId-`
+2. Mark the OSD as `out` if not already marked as such by Ceph. This signals Ceph to start moving (backfilling) the data that was on that OSD to another OSD.
    - `ceph osd out osd.<ID>` (for example if the OSD ID is 23 this would be `ceph osd out osd.23`)
-2. Wait for the data to finish backfilling to other OSDs.
+3. Wait for the data to finish backfilling to other OSDs.
    - `ceph status` will indicate the backfilling is done when all of the PGs are `active+clean`. If desired, it's safe to remove the disk after that.
-3. Remove the OSD from the Ceph cluster
+4. Remove the OSD from the Ceph cluster
    - `ceph osd purge <ID> --yes-i-really-mean-it`
-4. Verify the OSD is removed from the node in the CRUSH map
+5. Verify the OSD is removed from the node in the CRUSH map
    - `ceph osd tree`
 
 The operator can automatically remove OSD deployments that are considered "safe-to-destroy" by Ceph.

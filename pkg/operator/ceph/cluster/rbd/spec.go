@@ -22,7 +22,6 @@ import (
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/operator/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/controller"
-	cephcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
@@ -42,11 +41,10 @@ func (r *ReconcileCephRBDMirror) makeDeployment(daemonConfig *daemonConfig, rbdM
 			Containers: []v1.Container{
 				r.makeMirroringDaemonContainer(daemonConfig, rbdMirror),
 			},
-			RestartPolicy:      v1.RestartPolicyAlways,
-			Volumes:            controller.DaemonVolumes(daemonConfig.DataPathMap, daemonConfig.ResourceName),
-			HostNetwork:        r.cephClusterSpec.Network.IsHost(),
-			PriorityClassName:  rbdMirror.Spec.PriorityClassName,
-			ServiceAccountName: cephcontroller.DefaultServiceAccount,
+			RestartPolicy:     v1.RestartPolicyAlways,
+			Volumes:           controller.DaemonVolumes(daemonConfig.DataPathMap, daemonConfig.ResourceName),
+			HostNetwork:       r.cephClusterSpec.Network.IsHost(),
+			PriorityClassName: rbdMirror.Spec.PriorityClassName,
 		},
 	}
 
@@ -65,21 +63,11 @@ func (r *ReconcileCephRBDMirror) makeDeployment(daemonConfig *daemonConfig, rbdM
 	if r.cephClusterSpec.Network.IsHost() {
 		podSpec.Spec.DNSPolicy = v1.DNSClusterFirstWithHostNet
 	} else if r.cephClusterSpec.Network.IsMultus() {
-		if err := k8sutil.ApplyMultus(r.cephClusterSpec.Network.NetworkSpec, &podSpec.ObjectMeta); err != nil {
+		if err := k8sutil.ApplyMultus(r.cephClusterSpec.Network, &podSpec.ObjectMeta); err != nil {
 			return nil, err
 		}
 	}
 	rbdMirror.Spec.Placement.ApplyToPodSpec(&podSpec.Spec)
-
-	// If the rbd mirror has a peer we must add the relevant ceph config file and key to connect to it
-	// Both cm and secret have been created already, so it's fine to just reference them
-	if rbdMirror.Spec.Peers.HasPeers() {
-		// Add the config map and secret
-		// We only use the first peer in the list because peers are all the same, just the pool differs
-		firstPeer := rbdMirror.Spec.Peers.SecretNames[0]
-		volProjection := peerConfigMapAndSecretVolumeAndMount(r.peers[firstPeer].info.Peers[0].SiteName, r.peers[firstPeer].info.Peers[0].ClientName, r.peers[firstPeer].info.Peers[0].UUID)
-		podSpec.Spec.Volumes[0].VolumeSource.Projected.Sources = append(podSpec.Spec.Volumes[0].VolumeSource.Projected.Sources, volProjection...)
-	}
 
 	replicas := int32(rbdMirror.Spec.Count)
 	d := &apps.Deployment{
@@ -140,34 +128,4 @@ func (r *ReconcileCephRBDMirror) makeMirroringDaemonContainer(daemonConfig *daem
 	}
 
 	return container
-}
-
-// return the volume and matching volume mount for mounting the config map into /etc/ceph/
-func peerConfigMapAndSecretVolumeAndMount(siteName, clientName, peerSiteUUID string) []v1.VolumeProjection {
-	// Projection list
-	secretAndConfigMapVolumeProjections := []v1.VolumeProjection{}
-
-	// CM
-	configMapName := generatePeerCephConfigFileConfigMapName(peerSiteUUID) // configmap name and name of volume
-	configMapFile := fmt.Sprintf("%s.conf", siteName)
-	mode := int32(0444)
-	projectionConfigMap := &v1.ConfigMapProjection{Items: []v1.KeyToPath{{Key: peerCephConfigKey, Path: configMapFile, Mode: &mode}}}
-	projectionConfigMap.Name = configMapName
-
-	// Secret
-	secretName := generatePeerKeyringSecretName(peerSiteUUID) // secret name and name of volume
-	secretFile := fmt.Sprintf("%s.%s.keyring", siteName, clientName)
-	projectionSecret := &v1.SecretProjection{Items: []v1.KeyToPath{{Key: peerCephKeyringKey, Path: secretFile, Mode: &mode}}}
-	projectionSecret.Name = secretName
-
-	configMapProjection := v1.VolumeProjection{
-		ConfigMap: projectionConfigMap,
-	}
-	secretAndConfigMapVolumeProjections = append(secretAndConfigMapVolumeProjections, configMapProjection)
-	secretProjection := v1.VolumeProjection{
-		Secret: projectionSecret,
-	}
-	secretAndConfigMapVolumeProjections = append(secretAndConfigMapVolumeProjections, secretProjection)
-
-	return secretAndConfigMapVolumeProjections
 }

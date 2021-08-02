@@ -21,14 +21,11 @@ import (
 	"testing"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
 	testexec "github.com/rook/rook/pkg/operator/test"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
-	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -50,15 +47,15 @@ func testPrepareDeviceSets(t *testing.T, setTemplateName bool) {
 	if setTemplateName {
 		claim.Name = "randomname"
 	}
-	deviceSet := rookv1.StorageClassDeviceSet{
+	deviceSet := cephv1.StorageClassDeviceSet{
 		Name:                 "mydata",
 		Count:                1,
 		Portable:             true,
-		VolumeClaimTemplates: []v1.PersistentVolumeClaim{claim},
+		VolumeClaimTemplates: []corev1.PersistentVolumeClaim{claim},
 		SchedulerName:        "custom-scheduler",
 	}
 	spec := cephv1.ClusterSpec{
-		Storage: rookv1.StorageScopeSpec{StorageClassDeviceSets: []rookv1.StorageClassDeviceSet{deviceSet}},
+		Storage: cephv1.StorageScopeSpec{StorageClassDeviceSets: []cephv1.StorageClassDeviceSet{deviceSet}},
 	}
 	cluster := &Cluster{
 		context:     context,
@@ -67,14 +64,14 @@ func testPrepareDeviceSets(t *testing.T, setTemplateName bool) {
 	}
 
 	errs := newProvisionErrors()
-	volumeSources := cluster.prepareStorageClassDeviceSets(errs)
-	assert.Equal(t, 1, len(volumeSources))
+	cluster.prepareStorageClassDeviceSets(errs)
+	assert.Equal(t, 1, len(cluster.deviceSets))
 	assert.Equal(t, 0, errs.len())
-	assert.Equal(t, "mydata", volumeSources[0].Name)
-	assert.True(t, volumeSources[0].Portable)
-	_, dataOK := volumeSources[0].PVCSources["data"]
+	assert.Equal(t, "mydata", cluster.deviceSets[0].Name)
+	assert.True(t, cluster.deviceSets[0].Portable)
+	_, dataOK := cluster.deviceSets[0].PVCSources["data"]
 	assert.True(t, dataOK)
-	assert.Equal(t, "custom-scheduler", volumeSources[0].SchedulerName)
+	assert.Equal(t, "custom-scheduler", cluster.deviceSets[0].SchedulerName)
 
 	// Verify that the PVC has the expected generated name with the default of "data" in the name
 	pvcs, err := clientset.CoreV1().PersistentVolumeClaims(cluster.clusterInfo.Namespace).List(ctx, metav1.ListOptions{})
@@ -95,15 +92,15 @@ func TestPrepareDeviceSetWithHolesInPVCs(t *testing.T) {
 		Clientset: clientset,
 	}
 
-	deviceSet := rookv1.StorageClassDeviceSet{
+	deviceSet := cephv1.StorageClassDeviceSet{
 		Name:                 "mydata",
 		Count:                1,
 		Portable:             true,
-		VolumeClaimTemplates: []v1.PersistentVolumeClaim{testVolumeClaim("data"), testVolumeClaim("metadata"), testVolumeClaim("wal")},
+		VolumeClaimTemplates: []corev1.PersistentVolumeClaim{testVolumeClaim("data"), testVolumeClaim("metadata"), testVolumeClaim("wal")},
 		SchedulerName:        "custom-scheduler",
 	}
 	spec := cephv1.ClusterSpec{
-		Storage: rookv1.StorageScopeSpec{StorageClassDeviceSets: []rookv1.StorageClassDeviceSet{deviceSet}},
+		Storage: cephv1.StorageScopeSpec{StorageClassDeviceSets: []cephv1.StorageClassDeviceSet{deviceSet}},
 	}
 	ns := "testns"
 	cluster := &Cluster{
@@ -142,12 +139,12 @@ func TestPrepareDeviceSetWithHolesInPVCs(t *testing.T) {
 
 	// Create 3 PVCs for two OSDs in the device set
 	config := newProvisionErrors()
-	volumeSources := cluster.prepareStorageClassDeviceSets(config)
-	assert.Equal(t, 1, len(volumeSources))
+	cluster.prepareStorageClassDeviceSets(config)
+	assert.Equal(t, 1, len(cluster.deviceSets))
 	assert.Equal(t, 0, config.len())
-	assert.Equal(t, "mydata", volumeSources[0].Name)
-	assert.True(t, volumeSources[0].Portable)
-	_, dataOK := volumeSources[0].PVCSources["data"]
+	assert.Equal(t, "mydata", cluster.deviceSets[0].Name)
+	assert.True(t, cluster.deviceSets[0].Portable)
+	_, dataOK := cluster.deviceSets[0].PVCSources["data"]
 	assert.True(t, dataOK)
 
 	// Verify the PVCs all exist
@@ -160,8 +157,8 @@ func TestPrepareDeviceSetWithHolesInPVCs(t *testing.T) {
 
 	// Create 3 more PVCs (6 total) for two OSDs in the device set
 	cluster.spec.Storage.StorageClassDeviceSets[0].Count = 2
-	volumeSources = cluster.prepareStorageClassDeviceSets(config)
-	assert.Equal(t, 2, len(volumeSources))
+	cluster.prepareStorageClassDeviceSets(config)
+	assert.Equal(t, 2, len(cluster.deviceSets))
 	assert.Equal(t, 0, config.len())
 
 	// Verify the PVCs all exist
@@ -176,8 +173,8 @@ func TestPrepareDeviceSetWithHolesInPVCs(t *testing.T) {
 	assertPVCExists(t, clientset, ns, "mydata-wal-1-5")
 
 	// Verify the same number of PVCs exist after calling the reconcile again on the PVCs
-	volumeSources = cluster.prepareStorageClassDeviceSets(config)
-	assert.Equal(t, 2, len(volumeSources))
+	cluster.prepareStorageClassDeviceSets(config)
+	assert.Equal(t, 2, len(cluster.deviceSets))
 	pvcs, err = clientset.CoreV1().PersistentVolumeClaims(cluster.clusterInfo.Namespace).List(ctx, metav1.ListOptions{})
 	assert.NoError(t, err)
 	assert.Equal(t, 6, len(pvcs.Items))
@@ -185,8 +182,8 @@ func TestPrepareDeviceSetWithHolesInPVCs(t *testing.T) {
 	// Delete a single PVC and verify it will be re-created
 	err = clientset.CoreV1().PersistentVolumeClaims(cluster.clusterInfo.Namespace).Delete(ctx, "mydata-wal-0-2", metav1.DeleteOptions{})
 	assert.NoError(t, err)
-	volumeSources = cluster.prepareStorageClassDeviceSets(config)
-	assert.Equal(t, 2, len(volumeSources))
+	cluster.prepareStorageClassDeviceSets(config)
+	assert.Equal(t, 2, len(cluster.deviceSets))
 	pvcs, err = clientset.CoreV1().PersistentVolumeClaims(cluster.clusterInfo.Namespace).List(ctx, metav1.ListOptions{})
 	assert.NoError(t, err)
 	assert.Equal(t, 6, len(pvcs.Items))
@@ -199,16 +196,16 @@ func TestPrepareDeviceSetWithHolesInPVCs(t *testing.T) {
 	assert.NoError(t, err)
 	err = clientset.CoreV1().PersistentVolumeClaims(cluster.clusterInfo.Namespace).Delete(ctx, "mydata-wal-0-6", metav1.DeleteOptions{})
 	assert.NoError(t, err)
-	volumeSources = cluster.prepareStorageClassDeviceSets(config)
-	assert.Equal(t, 1, len(volumeSources))
+	cluster.prepareStorageClassDeviceSets(config)
+	assert.Equal(t, 1, len(cluster.deviceSets))
 	pvcs, err = clientset.CoreV1().PersistentVolumeClaims(cluster.clusterInfo.Namespace).List(ctx, metav1.ListOptions{})
 	assert.NoError(t, err)
 	assert.Equal(t, 3, len(pvcs.Items))
 
 	// Scale back up to a count of two and confirm that a new index is used for the PVCs
 	cluster.spec.Storage.StorageClassDeviceSets[0].Count = 2
-	volumeSources = cluster.prepareStorageClassDeviceSets(config)
-	assert.Equal(t, 2, len(volumeSources))
+	cluster.prepareStorageClassDeviceSets(config)
+	assert.Equal(t, 2, len(cluster.deviceSets))
 	pvcs, err = clientset.CoreV1().PersistentVolumeClaims(cluster.clusterInfo.Namespace).List(ctx, metav1.ListOptions{})
 	assert.NoError(t, err)
 	assert.Equal(t, 6, len(pvcs.Items))
@@ -226,47 +223,50 @@ func assertPVCExists(t *testing.T, clientset kubernetes.Interface, namespace, na
 	assert.NotNil(t, pvc)
 }
 
-func testVolumeClaim(name string) v1.PersistentVolumeClaim {
+func testVolumeClaim(name string) corev1.PersistentVolumeClaim {
 	storageClass := "mysource"
-	claim := v1.PersistentVolumeClaim{Spec: v1.PersistentVolumeClaimSpec{
+	claim := corev1.PersistentVolumeClaim{Spec: corev1.PersistentVolumeClaimSpec{
 		StorageClassName: &storageClass,
 	}}
 	claim.Name = name
 	return claim
 }
 
-func TestUpdatePVCSize(t *testing.T) {
+func TestPrepareDeviceSetsWithCrushParams(t *testing.T) {
+	ctx := context.TODO()
 	clientset := testexec.New(t, 1)
 	context := &clusterd.Context{
 		Clientset: clientset,
 	}
+	deviceSet := cephv1.StorageClassDeviceSet{
+		Name:                 "datawithcrushparams1",
+		Count:                1,
+		VolumeClaimTemplates: []corev1.PersistentVolumeClaim{testVolumeClaim("testwithcrushparams1")},
+		SchedulerName:        "custom-scheduler",
+	}
+	deviceSet.VolumeClaimTemplates[0].Annotations = map[string]string{
+		"crushDeviceClass":     "ssd",
+		"crushInitialWeight":   "0.75",
+		"crushPrimaryAffinity": "0.666",
+	}
+
+	spec := cephv1.ClusterSpec{
+		Storage: cephv1.StorageScopeSpec{StorageClassDeviceSets: []cephv1.StorageClassDeviceSet{deviceSet}},
+	}
 	cluster := &Cluster{
 		context:     context,
 		clusterInfo: client.AdminClusterInfo("testns"),
+		spec:        spec,
 	}
-	current := &v1.PersistentVolumeClaim{}
-	desired := &v1.PersistentVolumeClaim{}
-	current.Spec.Resources.Requests = v1.ResourceList{}
-	desired.Spec.Resources.Requests = v1.ResourceList{}
-	current.Spec.Resources.Requests[v1.ResourceStorage] = resource.MustParse("5Gi")
 
-	// Nothing happens if no size is set on the new PVC
-	cluster.updatePVCIfChanged(desired, current)
-	result, ok := current.Spec.Resources.Requests[v1.ResourceStorage]
-	assert.True(t, ok)
-	assert.Equal(t, "5Gi", result.String())
+	config := newProvisionErrors()
+	cluster.prepareStorageClassDeviceSets(config)
+	assert.Equal(t, 1, len(cluster.deviceSets))
+	assert.Equal(t, cluster.deviceSets[0].CrushDeviceClass, "ssd")
+	assert.Equal(t, cluster.deviceSets[0].CrushInitialWeight, "0.75")
+	assert.Equal(t, cluster.deviceSets[0].CrushPrimaryAffinity, "0.666")
 
-	// Nothing happens if the size shrinks
-	desired.Spec.Resources.Requests[v1.ResourceStorage] = resource.MustParse("4Gi")
-	cluster.updatePVCIfChanged(desired, current)
-	result, ok = current.Spec.Resources.Requests[v1.ResourceStorage]
-	assert.True(t, ok)
-	assert.Equal(t, "5Gi", result.String())
-
-	// The size is updated when it increases
-	desired.Spec.Resources.Requests[v1.ResourceStorage] = resource.MustParse("6Gi")
-	cluster.updatePVCIfChanged(desired, current)
-	result, ok = current.Spec.Resources.Requests[v1.ResourceStorage]
-	assert.True(t, ok)
-	assert.Equal(t, "6Gi", result.String())
+	pvcs, err := clientset.CoreV1().PersistentVolumeClaims(cluster.clusterInfo.Namespace).List(ctx, metav1.ListOptions{})
+	assert.NoError(t, err)
+	assert.Equal(t, 1, len(pvcs.Items))
 }

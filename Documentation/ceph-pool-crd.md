@@ -31,6 +31,26 @@ spec:
   deviceClass: hdd
 ```
 
+#### Hybrid Storage Pools
+Hybrid storage is a combination of two different storage tiers. For example, SSD and HDD.
+This helps to improve the read performance of cluster by placing, say, 1st copy of data on the higher performance tier (SSD or NVME) and remaining replicated copies on lower cost tier (HDDs).
+
+```yaml
+apiVersion: ceph.rook.io/v1
+kind: CephBlockPool
+metadata:
+  name: replicapool
+  namespace: rook-ceph
+spec:
+  failureDomain: host
+  replicated:
+    size: 3
+    hybridStorage:
+      primaryDeviceClass: ssd
+      secondaryDeviceClass: hdd
+```
+> **IMPORTANT**: The device classes `primaryDeviceClass` and `secondaryDeviceClass` must have at least one OSD associated with them or else the pool creation will fail.
+
 ### Erasure Coded
 
 This sample will lower the overall storage capacity requirement, while also adding redundancy by using [erasure coding](#erasure-coding).
@@ -64,7 +84,7 @@ When creating an erasure-coded pool, it is highly recommended to create the pool
 RADOS Block Device (RBD) mirroring is a process of asynchronous replication of Ceph block device images between two or more Ceph clusters.
 Mirroring ensures point-in-time consistent replicas of all changes to an image, including reads and writes, block device resizing, snapshots, clones and flattening.
 It is generally useful when planning for Disaster Recovery.
-For clusters that are geographically distributed and stretching is not possible due to high latencies.
+Mirroring is for clusters that are geographically distributed and stretching a single cluster is not possible due to high latencies.
 
 The following will enable mirroring of the pool at the image level:
 
@@ -188,6 +208,8 @@ stretched) then you will have 2 replicas per datacenter where each replica ends 
   * `snapshotSchedules`: schedule(s) snapshot at the **pool** level. **Only** supported as of Ceph Octopus release. One or more schedules are supported.
     * `interval`: frequency of the snapshots. The interval can be specified in days, hours, or minutes using d, h, m suffix respectively.
     * `startTime`: optional, determines at what time the snapshot process starts, specified using the ISO 8601 time format.
+  * `peers`: to configure mirroring peers
+    * `secretNames`:  a list of peers to connect to. Currently (Ceph Octopus release) **only a single** peer is supported where a peer represents a Ceph cluster.
 
 * `statusCheck`: Sets up pool mirroring status
   * `mirror`: displays the mirroring status

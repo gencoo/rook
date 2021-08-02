@@ -70,6 +70,7 @@ var (
 	blockPath               string
 	lvBackedPV              bool
 	osdIDsToRemove          string
+	preservePVC             bool
 )
 
 func addOSDFlags(command *cobra.Command) {
@@ -91,13 +92,14 @@ func addOSDFlags(command *cobra.Command) {
 	// flags for running osds that were provisioned by ceph-volume
 	osdStartCmd.Flags().StringVar(&osdStringID, "osd-id", "", "the osd ID")
 	osdStartCmd.Flags().StringVar(&osdUUID, "osd-uuid", "", "the osd UUID")
-	osdStartCmd.Flags().StringVar(&osdStoreType, "osd-store-type", "", "whether the osd is bluestore or filestore")
+	osdStartCmd.Flags().StringVar(&osdStoreType, "osd-store-type", "", "the osd store type such as bluestore")
 	osdStartCmd.Flags().BoolVar(&pvcBackedOSD, "pvc-backed-osd", false, "Whether the OSD backing store in PVC or not")
 	osdStartCmd.Flags().StringVar(&blockPath, "block-path", "", "Block path for the OSD created by ceph-volume")
 	osdStartCmd.Flags().BoolVar(&lvBackedPV, "lv-backed-pv", false, "Whether the PV located on LV")
 
 	// flags for removing OSDs that are unhealthy or otherwise should be purged from the cluster
 	osdRemoveCmd.Flags().StringVar(&osdIDsToRemove, "osd-ids", "", "OSD IDs to remove from the cluster")
+	osdRemoveCmd.Flags().BoolVar(&preservePVC, "preserve-pvc", false, "Whether PVCs for OSDs will be deleted")
 
 	// add the subcommands to the parent osd command
 	osdCmd.AddCommand(osdConfigCmd,
@@ -118,6 +120,7 @@ func addOSDConfigFlags(command *cobra.Command) {
 	command.Flags().IntVar(&cfg.storeConfig.OSDsPerDevice, "osds-per-device", 1, "the number of OSDs per device")
 	command.Flags().BoolVar(&cfg.storeConfig.EncryptedDevice, "encrypted-device", false, "whether to encrypt the OSD with dmcrypt")
 	command.Flags().StringVar(&cfg.storeConfig.DeviceClass, "osd-crush-device-class", "", "The device class for all OSDs configured on this node")
+	command.Flags().StringVar(&cfg.storeConfig.InitialWeight, "osd-crush-initial-weight", "", "The initial weight of OSD in TiB units")
 }
 
 func init() {
@@ -259,7 +262,7 @@ func removeOSDs(cmd *cobra.Command, args []string) error {
 	context := createContext()
 
 	// Run OSD remove sequence
-	err := osddaemon.RemoveOSDs(context, &clusterInfo, strings.Split(osdIDsToRemove, ","))
+	err := osddaemon.RemoveOSDs(context, &clusterInfo, strings.Split(osdIDsToRemove, ","), preservePVC)
 	if err != nil {
 		rook.TerminateFatal(err)
 	}
@@ -289,6 +292,10 @@ func getLocation(clientset kubernetes.Interface) (string, string, error) {
 
 // Parse the devices, which are sent as a JSON-marshalled list of device IDs with a StorageConfig spec
 func parseDevices(devices string) ([]osddaemon.DesiredDevice, error) {
+	if devices == "" {
+		return []osddaemon.DesiredDevice{}, nil
+	}
+
 	configuredDevices := []osdcfg.ConfiguredDevice{}
 	err := json.Unmarshal([]byte(devices), &configuredDevices)
 	if err != nil {
@@ -303,6 +310,7 @@ func parseDevices(devices string) ([]osddaemon.DesiredDevice, error) {
 		d.OSDsPerDevice = cd.StoreConfig.OSDsPerDevice
 		d.DatabaseSizeMB = cd.StoreConfig.DatabaseSizeMB
 		d.DeviceClass = cd.StoreConfig.DeviceClass
+		d.InitialWeight = cd.StoreConfig.InitialWeight
 		d.MetadataDevice = cd.StoreConfig.MetadataDevice
 
 		if d.OSDsPerDevice < 1 {

@@ -17,25 +17,31 @@ limitations under the License.
 package controller
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"math"
 	"reflect"
 	"testing"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
+	rookclient "github.com/rook/rook/pkg/client/clientset/versioned/fake"
+	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/ceph/config"
-	opconfig "github.com/rook/rook/pkg/operator/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/version"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	"github.com/rook/rook/pkg/operator/test"
+	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestPodVolumes(t *testing.T) {
-	dataPathMap := opconfig.NewDatalessDaemonDataPathMap("rook-ceph", "/var/lib/rook")
+	dataPathMap := config.NewDatalessDaemonDataPathMap("rook-ceph", "/var/lib/rook")
 
 	if err := test.VolumeIsEmptyDir(k8sutil.DataDirVolume, PodVolumes(dataPathMap, "", false)); err != nil {
 		t.Errorf("PodVolumes(\"\") - data dir source is not EmptyDir: %s", err.Error())
@@ -47,7 +53,7 @@ func TestPodVolumes(t *testing.T) {
 
 func TestMountsMatchVolumes(t *testing.T) {
 
-	dataPathMap := opconfig.NewDatalessDaemonDataPathMap("rook-ceph", "/var/lib/rook")
+	dataPathMap := config.NewDatalessDaemonDataPathMap("rook-ceph", "/var/lib/rook")
 
 	volsMountsTestDef := test.VolumesAndMountsTestDefinition{
 		VolumesSpec: &test.VolumesSpec{
@@ -163,14 +169,14 @@ func TestGenerateLivenessProbeExecDaemon(t *testing.T) {
 func TestDaemonFlags(t *testing.T) {
 	testcases := []struct {
 		label       string
-		clusterInfo *client.ClusterInfo
+		clusterInfo *cephclient.ClusterInfo
 		clusterSpec *cephv1.ClusterSpec
 		daemonID    string
 		expected    []string
 	}{
 		{
 			label: "case 1: IPv6 enabled",
-			clusterInfo: &client.ClusterInfo{
+			clusterInfo: &cephclient.ClusterInfo{
 				FSID: "id",
 			},
 			clusterSpec: &cephv1.ClusterSpec{
@@ -186,7 +192,7 @@ func TestDaemonFlags(t *testing.T) {
 		},
 		{
 			label: "case 2: IPv6 disabled",
-			clusterInfo: &client.ClusterInfo{
+			clusterInfo: &cephclient.ClusterInfo{
 				FSID: "id",
 			},
 			clusterSpec: &cephv1.ClusterSpec{},
@@ -209,7 +215,7 @@ func TestNetworkBindingFlags(t *testing.T) {
 	ipv6FlagTrue := "--ms-bind-ipv6=true"
 	ipv6FlagFalse := "--ms-bind-ipv6=false"
 	type args struct {
-		cluster *cephclient.ClusterInfo
+		cluster *client.ClusterInfo
 		spec    *cephv1.ClusterSpec
 	}
 	tests := []struct {
@@ -217,13 +223,13 @@ func TestNetworkBindingFlags(t *testing.T) {
 		args args
 		want []string
 	}{
-		{"octopus-ipv4", args{cluster: &cephclient.ClusterInfo{CephVersion: version.Octopus}, spec: &cephv1.ClusterSpec{Network: cephv1.NetworkSpec{IPFamily: cephv1.IPv4}}}, []string{ipv4FlagTrue, ipv6FlagFalse}},
-		{"octopus-ipv6", args{cluster: &cephclient.ClusterInfo{CephVersion: version.Octopus}, spec: &cephv1.ClusterSpec{Network: cephv1.NetworkSpec{IPFamily: cephv1.IPv6}}}, []string{ipv4FlagFalse, ipv6FlagTrue}},
-		{"octopus-dualstack-unsupported", args{cluster: &cephclient.ClusterInfo{CephVersion: version.Octopus}, spec: &cephv1.ClusterSpec{Network: cephv1.NetworkSpec{IPFamily: cephv1.IPv4, DualStack: true}}}, []string{}},
-		{"octopus-dualstack-unsupported-by-ipv6", args{cluster: &cephclient.ClusterInfo{CephVersion: version.Octopus}, spec: &cephv1.ClusterSpec{Network: cephv1.NetworkSpec{IPFamily: cephv1.IPv6, DualStack: true}}}, []string{ipv6FlagTrue}},
-		{"pacific-ipv4", args{cluster: &cephclient.ClusterInfo{CephVersion: version.Pacific}, spec: &cephv1.ClusterSpec{Network: cephv1.NetworkSpec{IPFamily: cephv1.IPv4}}}, []string{ipv4FlagTrue, ipv6FlagFalse}},
-		{"pacific-ipv6", args{cluster: &cephclient.ClusterInfo{CephVersion: version.Pacific}, spec: &cephv1.ClusterSpec{Network: cephv1.NetworkSpec{IPFamily: cephv1.IPv6}}}, []string{ipv4FlagFalse, ipv6FlagTrue}},
-		{"pacific-dualstack-supported", args{cluster: &cephclient.ClusterInfo{CephVersion: version.Pacific}, spec: &cephv1.ClusterSpec{Network: cephv1.NetworkSpec{IPFamily: cephv1.IPv6, DualStack: true}}}, []string{ipv4FlagTrue, ipv6FlagTrue}},
+		{"octopus-ipv4", args{cluster: &client.ClusterInfo{CephVersion: version.Octopus}, spec: &cephv1.ClusterSpec{Network: cephv1.NetworkSpec{IPFamily: cephv1.IPv4}}}, []string{ipv4FlagTrue, ipv6FlagFalse}},
+		{"octopus-ipv6", args{cluster: &client.ClusterInfo{CephVersion: version.Octopus}, spec: &cephv1.ClusterSpec{Network: cephv1.NetworkSpec{IPFamily: cephv1.IPv6}}}, []string{ipv4FlagFalse, ipv6FlagTrue}},
+		{"octopus-dualstack-unsupported", args{cluster: &client.ClusterInfo{CephVersion: version.Octopus}, spec: &cephv1.ClusterSpec{Network: cephv1.NetworkSpec{IPFamily: cephv1.IPv4, DualStack: true}}}, []string{}},
+		{"octopus-dualstack-unsupported-by-ipv6", args{cluster: &client.ClusterInfo{CephVersion: version.Octopus}, spec: &cephv1.ClusterSpec{Network: cephv1.NetworkSpec{IPFamily: cephv1.IPv6, DualStack: true}}}, []string{ipv6FlagTrue}},
+		{"pacific-ipv4", args{cluster: &client.ClusterInfo{CephVersion: version.Pacific}, spec: &cephv1.ClusterSpec{Network: cephv1.NetworkSpec{IPFamily: cephv1.IPv4}}}, []string{ipv4FlagTrue, ipv6FlagFalse}},
+		{"pacific-ipv6", args{cluster: &client.ClusterInfo{CephVersion: version.Pacific}, spec: &cephv1.ClusterSpec{Network: cephv1.NetworkSpec{IPFamily: cephv1.IPv6}}}, []string{ipv4FlagFalse, ipv6FlagTrue}},
+		{"pacific-dualstack-supported", args{cluster: &client.ClusterInfo{CephVersion: version.Pacific}, spec: &cephv1.ClusterSpec{Network: cephv1.NetworkSpec{IPFamily: cephv1.IPv6, DualStack: true}}}, []string{ipv4FlagTrue, ipv6FlagTrue}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -234,4 +240,155 @@ func TestNetworkBindingFlags(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestExtractMgrIP(t *testing.T) {
+	activeMgrRaw := "172.17.0.12:6801/2535462469"
+	ip := extractMgrIP(activeMgrRaw)
+	assert.Equal(t, "172.17.0.12", ip)
+}
+
+func TestConfigureExternalMetricsEndpoint(t *testing.T) {
+	t.Run("spec and current active mgr endpoint identical with no existing endpoint object", func(t *testing.T) {
+		monitoringSpec := cephv1.MonitoringSpec{
+			Enabled:              true,
+			RulesNamespace:       "rook-ceph",
+			ExternalMgrEndpoints: []v1.EndpointAddress{{IP: "192.168.0.1"}},
+		}
+		clusterInfo := &cephclient.ClusterInfo{
+			FSID:      "id",
+			Namespace: "rook-ceph",
+		}
+		executor := &exectest.MockExecutor{
+			MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
+				logger.Infof("Command: %s %v", command, args)
+				if args[1] == "dump" {
+					return fmt.Sprintf(`{"active_addr":"%s"}`, "192.168.0.1:6801/2535462469"), nil
+				}
+				return "", errors.New("unknown command")
+			},
+		}
+
+		ctx := &clusterd.Context{
+			Clientset:     test.New(t, 3),
+			RookClientset: rookclient.NewSimpleClientset(),
+			Executor:      executor,
+		}
+
+		err := ConfigureExternalMetricsEndpoint(ctx, monitoringSpec, clusterInfo, cephclient.NewMinimumOwnerInfo(t))
+		assert.NoError(t, err)
+
+		currentEndpoints, err := ctx.Clientset.CoreV1().Endpoints(namespace).Get(context.TODO(), "rook-ceph-mgr-external", metav1.GetOptions{})
+		assert.NoError(t, err)
+		assert.Equal(t, "192.168.0.1", currentEndpoints.Subsets[0].Addresses[0].IP, currentEndpoints)
+	})
+
+	t.Run("spec and current active mgr endpoint different with no existing endpoint object", func(t *testing.T) {
+		monitoringSpec := cephv1.MonitoringSpec{
+			Enabled:              true,
+			RulesNamespace:       "rook-ceph",
+			ExternalMgrEndpoints: []v1.EndpointAddress{{IP: "192.168.0.1"}},
+		}
+		clusterInfo := &cephclient.ClusterInfo{
+			FSID:      "id",
+			Namespace: "rook-ceph",
+		}
+		executor := &exectest.MockExecutor{
+			MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
+				logger.Infof("Command: %s %v", command, args)
+				if args[1] == "dump" {
+					return fmt.Sprintf(`{"active_addr":"%s"}`, "172.17.0.12:6801/2535462469"), nil
+				}
+				return "", errors.New("unknown command")
+			},
+		}
+		ctx := &clusterd.Context{
+			Clientset:     test.New(t, 3),
+			RookClientset: rookclient.NewSimpleClientset(),
+			Executor:      executor,
+		}
+
+		err := ConfigureExternalMetricsEndpoint(ctx, monitoringSpec, clusterInfo, cephclient.NewMinimumOwnerInfo(t))
+		assert.NoError(t, err)
+
+		currentEndpoints, err := ctx.Clientset.CoreV1().Endpoints(namespace).Get(context.TODO(), "rook-ceph-mgr-external", metav1.GetOptions{})
+		assert.NoError(t, err)
+		assert.Equal(t, "172.17.0.12", currentEndpoints.Subsets[0].Addresses[0].IP, currentEndpoints)
+	})
+
+	t.Run("spec and current active mgr endpoint different with existing endpoint object", func(t *testing.T) {
+		monitoringSpec := cephv1.MonitoringSpec{
+			Enabled:              true,
+			RulesNamespace:       "rook-ceph",
+			ExternalMgrEndpoints: []v1.EndpointAddress{{IP: "192.168.0.1"}},
+		}
+		clusterInfo := &cephclient.ClusterInfo{
+			FSID:      "id",
+			Namespace: "rook-ceph",
+		}
+		executor := &exectest.MockExecutor{
+			MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
+				logger.Infof("Command: %s %v", command, args)
+				if args[1] == "dump" {
+					return fmt.Sprintf(`{"active_addr":"%s"}`, "172.17.0.12:6801/2535462469"), nil
+				}
+				return "", errors.New("unknown command")
+			},
+		}
+		ctx := &clusterd.Context{
+			Clientset:     test.New(t, 3),
+			RookClientset: rookclient.NewSimpleClientset(),
+			Executor:      executor,
+		}
+		ownerInfo := cephclient.NewMinimumOwnerInfo(t)
+		ep, err := createExternalMetricsEndpoints(clusterInfo.Namespace, monitoringSpec, ownerInfo)
+		assert.NoError(t, err)
+		_, err = ctx.Clientset.CoreV1().Endpoints(namespace).Create(context.TODO(), ep, metav1.CreateOptions{})
+		assert.NoError(t, err)
+
+		err = ConfigureExternalMetricsEndpoint(ctx, monitoringSpec, clusterInfo, ownerInfo)
+		assert.NoError(t, err)
+
+		currentEndpoints, err := ctx.Clientset.CoreV1().Endpoints(namespace).Get(context.TODO(), "rook-ceph-mgr-external", metav1.GetOptions{})
+		assert.NoError(t, err)
+		assert.Equal(t, "172.17.0.12", currentEndpoints.Subsets[0].Addresses[0].IP, currentEndpoints)
+	})
+
+	t.Run("spec and current active mgr endpoint identical with existing endpoint object", func(t *testing.T) {
+		monitoringSpec := cephv1.MonitoringSpec{
+			Enabled:              true,
+			RulesNamespace:       "rook-ceph",
+			ExternalMgrEndpoints: []v1.EndpointAddress{{IP: "192.168.0.1"}},
+		}
+		clusterInfo := &cephclient.ClusterInfo{
+			FSID:      "id",
+			Namespace: "rook-ceph",
+		}
+		executor := &exectest.MockExecutor{
+			MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
+				logger.Infof("Command: %s %v", command, args)
+				if args[1] == "dump" {
+					return fmt.Sprintf(`{"active_addr":"%s"}`, "192.168.0.1:6801/2535462469"), nil
+				}
+				return "", errors.New("unknown command")
+			},
+		}
+		ctx := &clusterd.Context{
+			Clientset:     test.New(t, 3),
+			RookClientset: rookclient.NewSimpleClientset(),
+			Executor:      executor,
+		}
+		ownerInfo := cephclient.NewMinimumOwnerInfo(t)
+		ep, err := createExternalMetricsEndpoints(clusterInfo.Namespace, monitoringSpec, ownerInfo)
+		assert.NoError(t, err)
+		_, err = ctx.Clientset.CoreV1().Endpoints(namespace).Create(context.TODO(), ep, metav1.CreateOptions{})
+		assert.NoError(t, err)
+
+		err = ConfigureExternalMetricsEndpoint(ctx, monitoringSpec, clusterInfo, ownerInfo)
+		assert.NoError(t, err)
+
+		currentEndpoints, err := ctx.Clientset.CoreV1().Endpoints(namespace).Get(context.TODO(), "rook-ceph-mgr-external", metav1.GetOptions{})
+		assert.NoError(t, err)
+		assert.Equal(t, "192.168.0.1", currentEndpoints.Subsets[0].Addresses[0].IP, currentEndpoints)
+	})
 }

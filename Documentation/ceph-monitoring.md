@@ -144,6 +144,18 @@ The following Grafana dashboards are available:
 * [Ceph - OSD (Single)](https://grafana.com/dashboards/5336)
 * [Ceph - Pools](https://grafana.com/dashboards/5342)
 
+## Updates and Upgrades
+
+When updating Rook, there may be updates to RBAC for monitoring. It is easy to apply the changes
+with each update or upgrade. This should be done at the same time you update Rook common resources
+like `common.yaml`.
+
+```console
+kubectl apply -f cluster/examples/kubernetes/ceph/monitoring/rbac.yaml
+```
+
+> This is updated automatically if you are upgrading via the helm chart
+
 ## Teardown
 
 To clean up all the artifacts created by the monitoring walk-through, copy/paste the entire block below (note that errors about resources "not found" can be ignored):
@@ -179,3 +191,22 @@ This will create the service monitor to have promethues monitor CSI
 
 RBD per-image IO statistics collection is disabled by default. This can be enabled by setting `enableRBDStats: true` in the CephBlockPool spec.
 Prometheus does not need to be restarted after enabling it.
+
+### Using custom label selectors in Prometheus
+
+If Prometheus needs to select specific resources, we can do so by injecting labels into these objects and using it as label selector.
+
+```YAML
+apiVersion: ceph.rook.io/v1
+kind: CephCluster
+metadata:
+  name: rook-ceph
+  namespace: rook-ceph
+[...]
+spec:
+[...]
+labels:
+  monitoring:
+    prometheus: k8s
+[...]
+```

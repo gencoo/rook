@@ -24,13 +24,11 @@ import (
 
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mgr"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/osd"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/rbd"
 	"github.com/rook/rook/pkg/operator/ceph/controller"
-	cephcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
 	"github.com/rook/rook/pkg/operator/ceph/file/mds"
 	"github.com/rook/rook/pkg/operator/ceph/object"
 	"github.com/rook/rook/pkg/operator/k8sutil"
@@ -149,10 +147,9 @@ func (c *ClusterController) cleanUpJobTemplateSpec(cluster *cephv1.CephCluster, 
 			Containers: []v1.Container{
 				c.cleanUpJobContainer(cluster, monSecret, clusterFSID),
 			},
-			Volumes:            volumes,
-			RestartPolicy:      v1.RestartPolicyOnFailure,
-			PriorityClassName:  cephv1.GetCleanupPriorityClassName(cluster.Spec.PriorityClassNames),
-			ServiceAccountName: cephcontroller.DefaultServiceAccount,
+			Volumes:           volumes,
+			RestartPolicy:     v1.RestartPolicyOnFailure,
+			PriorityClassName: cephv1.GetCleanupPriorityClassName(cluster.Spec.PriorityClassNames),
 		},
 	}
 
@@ -166,11 +163,11 @@ func (c *ClusterController) cleanUpJobTemplateSpec(cluster *cephv1.CephCluster, 
 }
 
 // getCleanupPlacement returns the placement for the cleanup job
-func getCleanupPlacement(c cephv1.ClusterSpec) rookv1.Placement {
+func getCleanupPlacement(c cephv1.ClusterSpec) cephv1.Placement {
 	// The cleanup jobs are assigned by the operator to a specific node, so the
 	// node affinity and other affinity are not needed for scheduling.
 	// The only placement required for the cleanup daemons is the tolerations.
-	tolerations := c.Placement[rookv1.KeyAll].Tolerations
+	tolerations := c.Placement[cephv1.KeyAll].Tolerations
 	tolerations = append(tolerations, c.Placement[cephv1.KeyCleanup].Tolerations...)
 	tolerations = append(tolerations, c.Placement[cephv1.KeyMonArbiter].Tolerations...)
 	tolerations = append(tolerations, c.Placement[cephv1.KeyMon].Tolerations...)
@@ -181,7 +178,7 @@ func getCleanupPlacement(c cephv1.ClusterSpec) rookv1.Placement {
 	for _, deviceSet := range c.Storage.StorageClassDeviceSets {
 		tolerations = append(tolerations, deviceSet.Placement.Tolerations...)
 	}
-	return rookv1.Placement{Tolerations: tolerations}
+	return cephv1.Placement{Tolerations: tolerations}
 }
 
 func (c *ClusterController) waitForCephDaemonCleanUp(stopCleanupCh chan struct{}, cluster *cephv1.CephCluster, retryInterval time.Duration) error {
@@ -201,7 +198,6 @@ func (c *ClusterController) waitForCephDaemonCleanUp(stopCleanupCh chan struct{}
 
 			logger.Debugf("waiting for ceph daemons in cluster %q to be cleaned up. Retrying in %q",
 				cluster.Namespace, retryInterval.String())
-			break
 		case <-stopCleanupCh:
 			return errors.New("cancelling the host cleanup job")
 		}

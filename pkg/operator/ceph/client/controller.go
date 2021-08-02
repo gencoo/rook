@@ -36,10 +36,10 @@ import (
 	"github.com/coreos/pkg/capnslog"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
-	ceph "github.com/rook/rook/pkg/daemon/ceph/client"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
 	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
+	"github.com/rook/rook/pkg/operator/ceph/reporting"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	v1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
@@ -211,7 +211,7 @@ func (r *ReconcileCephClient) reconcile(request reconcile.Request) (reconcile.Re
 	err = r.createOrUpdateClient(cephClient)
 	if err != nil {
 		if strings.Contains(err.Error(), opcontroller.UninitializedCephConfigError) {
-			logger.Info("skipping reconcile since operator is still initializing")
+			logger.Info(opcontroller.OperatorNotInitializedMessage)
 			return opcontroller.WaitForRequeueIfOperatorNotInitialized, nil
 		}
 		updateStatus(r.client, request.NamespacedName, cephv1.ConditionFailure)
@@ -235,14 +235,14 @@ func (r *ReconcileCephClient) createOrUpdateClient(cephClient *cephv1.CephClient
 	clientEntity, caps := genClientEntity(cephClient)
 
 	// Check if client was created manually, create if necessary or update caps and create secret
-	key, err := ceph.AuthGetKey(r.context, r.clusterInfo, clientEntity)
+	key, err := cephclient.AuthGetKey(r.context, r.clusterInfo, clientEntity)
 	if err != nil {
-		key, err = ceph.AuthGetOrCreateKey(r.context, r.clusterInfo, clientEntity, caps)
+		key, err = cephclient.AuthGetOrCreateKey(r.context, r.clusterInfo, clientEntity, caps)
 		if err != nil {
 			return errors.Wrapf(err, "failed to create client %q", cephClient.Name)
 		}
 	} else {
-		err = ceph.AuthUpdateCaps(r.context, r.clusterInfo, clientEntity, caps)
+		err = cephclient.AuthUpdateCaps(r.context, r.clusterInfo, clientEntity, caps)
 		if err != nil {
 			return errors.Wrapf(err, "client %q exists, failed to update client caps", cephClient.Name)
 		}
@@ -292,7 +292,7 @@ func (r *ReconcileCephClient) createOrUpdateClient(cephClient *cephv1.CephClient
 // Delete the client
 func (r *ReconcileCephClient) deleteClient(cephClient *cephv1.CephClient) error {
 	logger.Infof("deleting client object %q", cephClient.Name)
-	if err := ceph.AuthDelete(r.context, r.clusterInfo, generateClientName(cephClient.Name)); err != nil {
+	if err := cephclient.AuthDelete(r.context, r.clusterInfo, generateClientName(cephClient.Name)); err != nil {
 		return errors.Wrapf(err, "failed to delete client %q", cephClient.Name)
 	}
 
@@ -356,7 +356,7 @@ func updateStatus(client client.Client, name types.NamespacedName, status cephv1
 	if cephClient.Status.Phase == cephv1.ConditionReady {
 		cephClient.Status.Info = generateStatusInfo(cephClient)
 	}
-	if err := opcontroller.UpdateStatus(client, cephClient); err != nil {
+	if err := reporting.UpdateStatus(client, cephClient); err != nil {
 		logger.Errorf("failed to set ceph client %q status to %q. %v", name, status, err)
 		return
 	}

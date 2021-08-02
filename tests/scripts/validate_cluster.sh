@@ -69,12 +69,7 @@ function test_demo_mds {
   # so we first check if the pools exit, from that we assume that
   # the process will start. We stop waiting after 10 seconds.
   # shellcheck disable=SC2046
-  return $(wait_for_daemon "$EXEC_COMMAND osd dump | grep -sq cephfs && $EXEC_COMMAND -s | grep -sq 'up:active'")
-}
-
-function test_demo_rgw {
-  # shellcheck disable=SC2046
-  return $(wait_for_daemon "$EXEC_COMMAND -s | grep -sq 'rgw:'")
+  return $(wait_for_daemon "$EXEC_COMMAND osd dump | grep -sq cephfs && $EXEC_COMMAND -s | grep -sq up")
 }
 
 function test_demo_rbd_mirror {
@@ -84,11 +79,7 @@ function test_demo_rbd_mirror {
 
 function test_demo_fs_mirror {
   # shellcheck disable=SC2046
-  timeout 90 sh -c 'until [ $(kubectl -n rook-ceph get pods --field-selector=status.phase=Running -l app=rook-ceph-filesystem-mirror --no-headers=true|wc -l) -eq 1 ]; do sleep 1; done'
-  if [ $? -eq 0 ]; then
-    return 0
-  fi
-  return 1
+    return $(wait_for_daemon "$EXEC_COMMAND -s | grep -sq 'cephfs-mirror:'")
 }
 
 function test_demo_pool {
@@ -110,10 +101,14 @@ function display_status {
   $EXEC_COMMAND osd dump > test/ceph-osd-dump.txt
   $EXEC_COMMAND report > test/ceph-report.txt
 
-  kubectl -n rook-ceph logs "$(kubectl -n rook-ceph -l app=rook-ceph-operator get pods -o jsonpath='{.items[*].metadata.name}')" > test/operator.txt
-  kubectl -n rook-ceph get pods > test/pods-list.txt
-  kubectl -n rook-ceph describe job/"$(kubectl -n rook-ceph get pod -l app=rook-ceph-osd-prepare -o jsonpath='{.items[*].metadata.name}')" > test/osd-prepare.txt
-  kubectl -n rook-ceph describe deploy/rook-ceph-osd-0 > test/osd-deploy.txt
+  kubectl -n rook-ceph logs deploy/rook-ceph-operator > test/operator-logs.txt
+  kubectl -n rook-ceph get pods -o wide > test/pods-list.txt
+  kubectl -n rook-ceph describe job/"$(kubectl -n rook-ceph get job -l app=rook-ceph-osd-prepare -o jsonpath='{.items[*].metadata.name}')" > test/osd-prepare-describe.txt
+  kubectl -n rook-ceph log job/"$(kubectl -n rook-ceph get job -l app=rook-ceph-osd-prepare -o jsonpath='{.items[*].metadata.name}')" > test/osd-prepare-logs.txt
+  kubectl -n rook-ceph describe deploy/rook-ceph-osd-0 > test/rook-ceph-osd-0-describe.txt
+  kubectl -n rook-ceph describe deploy/rook-ceph-osd-1 > test/rook-ceph-osd-1-describe.txt
+  kubectl -n rook-ceph logs deploy/rook-ceph-osd-0 --all-containers > test/rook-ceph-osd-0-logs.txt
+  kubectl -n rook-ceph logs deploy/rook-ceph-osd-1 --all-containers > test/rook-ceph-osd-1-logs.txt
   kubectl get all -n rook-ceph -o wide > test/cluster-wide.txt
   kubectl get all -n rook-ceph -o yaml > test/cluster-yaml.txt
   kubectl -n rook-ceph get cephcluster -o yaml > test/cephcluster.txt
@@ -128,7 +123,7 @@ test_demo_mon
 test_demo_mgr
 
 if [[ "$DAEMON_TO_VALIDATE" == "all" ]]; then
-  daemons_list="osd mds rgw rbd_mirror"
+  daemons_list="osd mds rgw rbd_mirror fs_mirror"
 else
   # change commas to space
   comma_to_space=${DAEMON_TO_VALIDATE//,/ }
@@ -160,9 +155,12 @@ for daemon in $daemons_list; do
     rbd_mirror)
       test_demo_rbd_mirror
       ;;
+    fs_mirror)
+      test_demo_fs_mirror
+      ;;
     *)
       log "ERROR: unknown daemon to validate!"
-      log "Available daemon are: mon mgr osd mds rgw rbd_mirror"
+      log "Available daemon are: mon mgr osd mds rgw rbd_mirror fs_mirror"
       exit 1
       ;;
   esac

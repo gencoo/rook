@@ -25,9 +25,7 @@ import (
 	"github.com/rook/rook/pkg/clusterd"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/ceph/config"
-	cephcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
-	"github.com/rook/rook/pkg/operator/test"
 	optest "github.com/rook/rook/pkg/operator/test"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
@@ -66,7 +64,7 @@ func TestDeploymentSpec(t *testing.T) {
 		},
 	}
 
-	clientset := test.New(t, 1)
+	clientset := optest.New(t, 1)
 	c := &clusterd.Context{
 		Executor:      &exectest.MockExecutor{},
 		RookClientset: rookclient.NewSimpleClientset(),
@@ -103,7 +101,7 @@ func TestDeploymentSpec(t *testing.T) {
 		},
 		cephClusterSpec: &cephv1.ClusterSpec{
 			CephVersion: cephv1.CephVersionSpec{
-				Image: "ceph/ceph:v15",
+				Image: "quay.io/ceph/ceph:v15",
 			},
 		},
 	}
@@ -137,5 +135,4 @@ func TestDeploymentSpec(t *testing.T) {
 		},
 	)
 	assert.Equal(t, "my-priority-class", d.Spec.Template.Spec.PriorityClassName)
-	assert.Equal(t, cephcontroller.DefaultServiceAccount, d.Spec.Template.Spec.ServiceAccountName)
 }

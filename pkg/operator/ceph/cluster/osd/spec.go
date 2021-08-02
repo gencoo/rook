@@ -22,14 +22,13 @@ import (
 	"path"
 	"path/filepath"
 	"strconv"
-	"strings"
 
 	"github.com/libopenstorage/secrets"
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	kms "github.com/rook/rook/pkg/daemon/ceph/osd/kms"
 	opconfig "github.com/rook/rook/pkg/operator/ceph/config"
+	cephkey "github.com/rook/rook/pkg/operator/ceph/config/keyring"
 	"github.com/rook/rook/pkg/operator/ceph/controller"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	apps "k8s.io/api/apps/v1"
@@ -69,24 +68,28 @@ const (
 )
 
 const (
-	activateOSDCode = `
-set -ex
+	activateOSDOnNodeCode = `
+set -o errexit
+set -o pipefail
+set -o nounset # fail if variables are unset
+set -o xtrace
 
-OSD_ID=%s
+OSD_ID="$ROOK_OSD_ID"
 OSD_UUID=%s
 OSD_STORE_FLAG="%s"
 OSD_DATA_DIR=/var/lib/ceph/osd/ceph-"$OSD_ID"
 CV_MODE=%s
 DEVICE="$%s"
-METADATA_DEVICE="$%s"
-WAL_DEVICE="$%s"
+
+# create new keyring
+ceph -n client.admin auth get-or-create osd."$OSD_ID" mon 'allow profile osd' mgr 'allow profile osd' osd 'allow *' -k /etc/ceph/admin-keyring-store/keyring
 
 # active the osd with ceph-volume
 if [[ "$CV_MODE" == "lvm" ]]; then
 	TMP_DIR=$(mktemp -d)
 
 	# activate osd
-	ceph-volume "$CV_MODE" activate --no-systemd "$OSD_STORE_FLAG" "$OSD_ID" "$OSD_UUID"
+	ceph-volume lvm activate --no-systemd "$OSD_STORE_FLAG" "$OSD_ID" "$OSD_UUID"
 
 	# copy the tmpfs directory to a temporary directory
 	# this is needed because when the init container exits, the tmpfs goes away and its content with it
@@ -105,22 +108,48 @@ if [[ "$CV_MODE" == "lvm" ]]; then
 	# remove the temporary directory
 	rm --recursive --force "$TMP_DIR"
 else
-	ARGS=(--device ${DEVICE} --no-systemd --no-tmpfs)
-	if [ -n "$METADATA_DEVICE" ]; then
-		ARGS+=(--block.db ${METADATA_DEVICE})
-	fi
-	if [ -n "$WAL_DEVICE" ]; then
-		ARGS+=(--block.wal ${WAL_DEVICE})
-	fi
-	# ceph-volume raw mode only supports bluestore so we don't need to pass a store flag
-	ceph-volume "$CV_MODE" activate "${ARGS[@]}"
-fi
+	# 'ceph-volume raw list' (which the osd-prepare job uses to report OSDs on nodes)
+	#  returns user-friendly device names which can change when systems reboot. To
+	# keep OSD pods from crashing repeatedly after a reboot, we need to check if the
+	# block device we have is still correct, and if it isn't correct, we need to
+	# scan all the disks to find the right one.
+	OSD_LIST="$(mktemp)"
 
+	function find_device() {
+		# jq would be preferable, but might be removed for hardened Ceph images
+		# python3 should exist in all containers having Ceph
+		python3 -c "
+import sys, json
+for _, info in json.load(sys.stdin).items():
+	if info['osd_id'] == $OSD_ID:
+		print(info['device'], end='')
+		print('found device: ' + info['device'], file=sys.stderr) # log the disk we found to stderr
+		sys.exit(0)  # don't keep processing once the disk is found
+sys.exit('no disk found with OSD ID $OSD_ID')
+"
+	}
+
+	ceph-volume raw list "$DEVICE" > "$OSD_LIST"
+	cat "$OSD_LIST"
+
+	if ! find_device < "$OSD_LIST"; then
+		ceph-volume raw list > "$OSD_LIST"
+		cat "$OSD_LIST"
+
+		DEVICE="$(find_device < "$OSD_LIST")"
+	fi
+	[[ -z "$DEVICE" ]] && { echo "no device" ; exit 1 ; }
+
+	# ceph-volume raw mode only supports bluestore so we don't need to pass a store flag
+	ceph-volume raw activate --device "$DEVICE" --no-systemd --no-tmpfs
+fi
 `
 
 	openEncryptedBlock = `
 set -xe
 
+CEPH_FSID=%s
+PVC_NAME=%s
 KEY_FILE_PATH=%s
 BLOCK_PATH=%s
 DM_NAME=%s
@@ -133,6 +162,12 @@ function open_encrypted_block {
 	echo "Opening encrypted device $BLOCK_PATH at $DM_PATH"
 	cryptsetup luksOpen --verbose --disable-keyring --allow-discards --key-file "$KEY_FILE_PATH" "$BLOCK_PATH" "$DM_NAME"
 	rm -f "$KEY_FILE_PATH"
+}
+
+# This is done for upgraded clusters that did not have the subsystem and label set by the prepare job
+function set_luks_subsystem_and_label {
+	echo "setting LUKS label and subsystem"
+	cryptsetup config $BLOCK_PATH --subsystem ceph_fsid="$CEPH_FSID" --label pvc_name="$PVC_NAME"
 }
 
 if [ -b "$DM_PATH" ]; then
@@ -151,6 +186,13 @@ if [ -b "$DM_PATH" ]; then
 else
 	open_encrypted_block
 fi
+
+# Setting label and subsystem on LUKS1 is not supported and the command will fail
+if cryptsetup luksDump $BLOCK_PATH|grep -qEs "Version:.*2"; then
+	set_luks_subsystem_and_label
+else
+	echo "LUKS version is not 2 so not setting label and subsystem"
+fi
 `
 	// #nosec G101 no leak just variable names
 	getKEKFromVaultWithToken = `
@@ -160,7 +202,7 @@ set -e
 KEK_NAME=%s
 KEY_PATH=%s
 CURL_PAYLOAD=$(mktemp)
-ARGS=(--silent --show-error --request GET --header "X-Vault-Token: ${VAULT_TOKEN}")
+ARGS=(--silent --show-error --request GET --header "X-Vault-Token: ${VAULT_TOKEN//[$'\t\r\n']}")
 PYTHON_DATA_PARSE="['data']"
 
 # If a vault namespace is set
@@ -175,7 +217,11 @@ fi
 
 # TLS args
 if [ -n "$VAULT_CACERT" ]; then
-  ARGS+=(--capath $(dirname "${VAULT_CACERT}"))
+  if [ -z "$VAULT_CLIENT_CERT" ] && [ -z "$VAULT_CLIENT_KEY" ]; then
+    ARGS+=(--cacert "${VAULT_CACERT}")
+  else
+    ARGS+=(--capath $(dirname "${VAULT_CACERT}"))
+  fi
 fi
 if [ -n "$VAULT_CLIENT_CERT" ]; then
   ARGS+=(--cert "${VAULT_CLIENT_CERT}")
@@ -204,15 +250,20 @@ fi
 curl "${ARGS[@]}" "$VAULT_ADDR"/v1/"$VAULT_BACKEND_PATH"/"$KEK_NAME" > "$CURL_PAYLOAD"
 
 # Check for warnings in the payload
-if python3 -c "import sys, json; print(json.load(sys.stdin)[\"warnings\"], end='')" 2> /dev/null < "$CURL_PAYLOAD"; then
-  # We could get a warning but it is not necessary an issue, so if there is no key we exit
-  if ! python3 -c "import sys, json; print(json.load(sys.stdin)${PYTHON_DATA_PARSE}[\"$KEK_NAME\"], end='')" 2> /dev/null < "$CURL_PAYLOAD"; then
-    exit 1
+if warning=$(python3 -c "import sys, json; print(json.load(sys.stdin)[\"warnings\"], end='')" 2> /dev/null < "$CURL_PAYLOAD"); then
+  if [[ "$warning" != None ]]; then
+    # We could get a warning but it is not necessary an issue, so if there is no key we exit
+    if ! python3 -c "import sys, json; print(json.load(sys.stdin)${PYTHON_DATA_PARSE}[\"$KEK_NAME\"], end='')" &> /dev/null < "$CURL_PAYLOAD"; then
+      echo "no encryption key $KEK_NAME present in vault"
+      echo "$warning"
+      exit 1
+    fi
   fi
 fi
 
 # Check for errors in the payload
-if python3 -c "import sys, json; print(json.load(sys.stdin)[\"errors\"], end='')" 2> /dev/null < "$CURL_PAYLOAD"; then
+if error=$(python3 -c "import sys, json; print(json.load(sys.stdin)[\"errors\"], end='')" 2> /dev/null < "$CURL_PAYLOAD"); then
+  echo "$error"
   exit 1
 fi
 
@@ -295,9 +346,8 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 	}
 	volumes := controller.PodVolumes(provisionConfig.DataPathMap, dataDirHostPath, false)
 	failureDomainValue := osdProps.crushHostname
-	doConfigInit := true       // initialize ceph.conf in init container?
-	doBinaryCopyInit := true   // copy tini and rook binaries in an init container?
-	doActivateOSDInit := false // run an init container to activate the osd?
+	doConfigInit := true     // initialize ceph.conf in init container?
+	doBinaryCopyInit := true // copy tini and rook binaries in an init container?
 
 	// This property is used for both PVC and non-PVC use case
 	if osd.CVMode == "" {
@@ -306,8 +356,8 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 
 	dataDir := k8sutil.DataDir
 	// Create volume config for /dev so the pod can access devices on the host
-	// Only valid when running OSD with LVM and Raw mode
-	if !osdProps.onPVC() {
+	// Only valid when running OSD on device or OSD on LV-backed PVC
+	if !osdProps.onPVC() || osd.CVMode == "lvm" {
 		devVolume := v1.Volume{Name: "devices", VolumeSource: v1.VolumeSource{HostPath: &v1.HostPathVolumeSource{Path: "/dev"}}}
 		volumes = append(volumes, devVolume)
 		devMount := v1.VolumeMount{Name: "devices", MountPath: "/dev"}
@@ -317,12 +367,15 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 	// If the OSD runs on PVC
 	if osdProps.onPVC() {
 		// Create volume config for PVCs
-		volumes = append(volumes, getPVCOSDVolumes(&osdProps, c.context.ConfigDir, c.clusterInfo.Namespace, false)...)
+		volumes = append(volumes, getPVCOSDVolumes(&osdProps, c.spec.DataDirHostPath, c.clusterInfo.Namespace, false)...)
 		// If encrypted let's add the secret key mount path
 		if osdProps.encrypted && osd.CVMode == "raw" {
 			encryptedVol, _ := c.getEncryptionVolume(osdProps)
 			volumes = append(volumes, encryptedVol)
-			if c.spec.Security.KeyManagementService.IsEnabled() {
+			// We don't need to pass the Volume with projection for TLS when TLS is not enabled
+			// Somehow when this happens and we try to update a deployment spec it fails with:
+			//  ValidationError(Pod.spec.volumes[7].projected): missing required field "sources"
+			if c.spec.Security.KeyManagementService.IsEnabled() && c.spec.Security.KeyManagementService.IsTLSEnabled() {
 				encryptedVol, _ := kms.VaultVolumeAndMount(c.spec.Security.KeyManagementService.ConnectionDetails)
 				volumes = append(volumes, encryptedVol)
 			}
@@ -350,6 +403,7 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 		{Name: "CEPH_ARGS", Value: "-m $(ROOK_CEPH_MON_HOST)"},
 		blockPathEnvVariable(osd.BlockPath),
 		cvModeEnvVariable(osd.CVMode),
+		dataDeviceClassEnvVar(osd.DeviceClass),
 	}...)
 	configEnvVars := append(c.getConfigEnvVars(osdProps, dataDir), []v1.EnvVar{
 		tiniEnvVar,
@@ -392,7 +446,6 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 	} else {
 		doBinaryCopyInit = false
 		doConfigInit = false
-		doActivateOSDInit = true
 		command = []string{"ceph-osd"}
 		args = []string{
 			"--foreground",
@@ -402,6 +455,11 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 			"--setgroup", "ceph",
 			fmt.Sprintf("--crush-location=%s", osd.Location),
 		}
+	}
+
+	// Ceph expects initial weight as float value in tera-bytes units
+	if osdProps.storeConfig.InitialWeight != "" {
+		args = append(args, fmt.Sprintf("--osd-crush-initial-weight=%s", osdProps.storeConfig.InitialWeight))
 	}
 
 	// If the OSD runs on PVC
@@ -444,9 +502,9 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 	// so that it can pick the already mounted/activated osd metadata path
 	// This container will activate the OSD and place the activated filesinto an empty dir
 	// The empty dir will be shared by the "activate-osd" pod and the "osd" main pod
-	activateOSDVolume, activateOSDContainer := c.getActivateOSDInitContainer(c.context.ConfigDir, c.clusterInfo.Namespace, osdID, osd, osdProps)
-	if doActivateOSDInit {
-		volumes = append(volumes, activateOSDVolume)
+	activateOSDVolume, activateOSDContainer := c.getActivateOSDInitContainer(c.spec.DataDirHostPath, c.clusterInfo.Namespace, osdID, osd, osdProps)
+	if !osdProps.onPVC() {
+		volumes = append(volumes, activateOSDVolume...)
 		volumeMounts = append(volumeMounts, activateOSDContainer.VolumeMounts[0])
 	}
 
@@ -498,11 +556,10 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 	if doBinaryCopyInit {
 		initContainers = append(initContainers, *copyBinariesContainer)
 	}
+
 	if osdProps.onPVC() && osd.CVMode == "lvm" {
 		initContainers = append(initContainers, c.getPVCInitContainer(osdProps))
-	}
-
-	if osdProps.onPVC() && osd.CVMode == "raw" {
+	} else if osdProps.onPVC() && osd.CVMode == "raw" {
 		// Copy main block device to an empty dir
 		initContainers = append(initContainers, c.getPVCInitContainerActivate(osdDataDirPath, osdProps))
 		// Copy main block.db device to an empty dir
@@ -525,9 +582,7 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 		}
 		initContainers = append(initContainers, c.getActivatePVCInitContainer(osdProps, osdID))
 		initContainers = append(initContainers, c.getExpandPVCInitContainer(osdProps, osdID))
-
-	}
-	if doActivateOSDInit {
+	} else {
 		initContainers = append(initContainers, *activateOSDContainer)
 	}
 
@@ -604,8 +659,8 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 
 	if c.spec.Network.IsHost() {
 		podTemplateSpec.Spec.DNSPolicy = v1.DNSClusterFirstWithHostNet
-	} else if c.spec.Network.NetworkSpec.IsMultus() {
-		if err := k8sutil.ApplyMultus(c.spec.Network.NetworkSpec, &podTemplateSpec.ObjectMeta); err != nil {
+	} else if c.spec.Network.IsMultus() {
+		if err := k8sutil.ApplyMultus(c.spec.Network, &podTemplateSpec.ObjectMeta); err != nil {
 			return nil, err
 		}
 	}
@@ -701,7 +756,7 @@ func applyTopologyAffinity(spec *v1.PodSpec, osd OSDInfo) error {
 		return errors.Wrapf(err, "failed to generate osd %d topology affinity", osd.ID)
 	}
 	// merge the node affinity for the topology with the existing affinity
-	p := rookv1.Placement{NodeAffinity: nodeAffinity}
+	p := cephv1.Placement{NodeAffinity: nodeAffinity}
 	p.ApplyToPodSpec(spec)
 
 	return nil
@@ -725,28 +780,36 @@ func (c *Cluster) getCopyBinariesContainer() (v1.Volume, *v1.Container) {
 }
 
 // This container runs all the actions needed to activate an OSD before we can run the OSD process
-func (c *Cluster) getActivateOSDInitContainer(configDir, namespace, osdID string, osdInfo OSDInfo, osdProps osdProperties) (v1.Volume, *v1.Container) {
+func (c *Cluster) getActivateOSDInitContainer(configDir, namespace, osdID string, osdInfo OSDInfo, osdProps osdProperties) ([]v1.Volume, *v1.Container) {
 	// We need to use hostPath because the same reason as written in the comment of getDataBridgeVolumeSource()
+
 	hostPathType := v1.HostPathDirectoryOrCreate
 	source := v1.VolumeSource{
 		HostPath: &v1.HostPathVolumeSource{
 			Path: filepath.Join(
 				configDir,
 				namespace,
-				strings.ReplaceAll(osdInfo.BlockPath, "/", "_"),
+				c.clusterInfo.FSID+"_"+osdInfo.UUID,
 			),
 			Type: &hostPathType,
 		},
 	}
-	volume := v1.Volume{
-		Name:         activateOSDVolumeName,
-		VolumeSource: source,
+	volume := []v1.Volume{
+		{
+			Name:         activateOSDVolumeName,
+			VolumeSource: source,
+		},
 	}
+
+	adminKeyringVol, adminKeyringVolMount := cephkey.Volume().Admin(), cephkey.VolumeMount().Admin()
+	volume = append(volume, adminKeyringVol)
+
 	envVars := append(
 		osdActivateEnvVar(),
 		blockPathEnvVariable(osdInfo.BlockPath),
 		metadataDeviceEnvVar(osdInfo.MetadataPath),
 		walDeviceEnvVar(osdInfo.WalPath),
+		v1.EnvVar{Name: "ROOK_OSD_ID", Value: osdID},
 	)
 	osdStore := "--bluestore"
 
@@ -758,6 +821,7 @@ func (c *Cluster) getActivateOSDInitContainer(configDir, namespace, osdID string
 		{Name: "devices", MountPath: "/dev"},
 		{Name: k8sutil.ConfigOverrideName, ReadOnly: true, MountPath: opconfig.EtcCephDir},
 	}
+	volMounts = append(volMounts, adminKeyringVolMount)
 
 	if osdProps.onPVC() {
 		volMounts = append(volMounts, getPvcOSDBridgeMount(osdProps.pvc.ClaimName))
@@ -767,7 +831,7 @@ func (c *Cluster) getActivateOSDInitContainer(configDir, namespace, osdID string
 		Command: []string{
 			"/bin/bash",
 			"-c",
-			fmt.Sprintf(activateOSDCode, osdID, osdInfo.UUID, osdStore, osdInfo.CVMode, blockPathVarName, osdMetadataDeviceEnvVarName, osdWalDeviceEnvVarName),
+			fmt.Sprintf(activateOSDOnNodeCode, osdInfo.UUID, osdStore, osdInfo.CVMode, blockPathVarName),
 		},
 		Name:            "activate",
 		Image:           c.spec.CephVersion.Image,
@@ -845,7 +909,7 @@ func (c *Cluster) generateEncryptionOpenBlockContainer(resources v1.ResourceRequ
 		Command: []string{
 			"/bin/bash",
 			"-c",
-			fmt.Sprintf(openEncryptedBlock, encryptionKeyPath(), encryptionBlockDestinationCopy(mountPath, blockType), encryptionDMName(pvcName, cryptBlockType), encryptionDMPath(pvcName, cryptBlockType)),
+			fmt.Sprintf(openEncryptedBlock, c.clusterInfo.FSID, pvcName, encryptionKeyPath(), encryptionBlockDestinationCopy(mountPath, blockType), encryptionDMName(pvcName, cryptBlockType), encryptionDMPath(pvcName, cryptBlockType)),
 		},
 		VolumeMounts:    []v1.VolumeMount{getPvcOSDBridgeMountActivate(mountPath, volumeMountPVCName), getDeviceMapperMount()},
 		SecurityContext: PrivilegedContext(),
@@ -883,8 +947,10 @@ func (c *Cluster) getPVCEncryptionOpenInitContainerActivate(mountPath string, os
 				getKEKFromKMSContainer.VolumeMounts = append(getKEKFromKMSContainer.VolumeMounts, volMount)
 
 				// Now let's see if there is a TLS config we need to mount as well
-				_, vaultVolMount := kms.VaultVolumeAndMount(c.spec.Security.KeyManagementService.ConnectionDetails)
-				getKEKFromKMSContainer.VolumeMounts = append(getKEKFromKMSContainer.VolumeMounts, vaultVolMount)
+				if c.spec.Security.KeyManagementService.IsTLSEnabled() {
+					_, vaultVolMount := kms.VaultVolumeAndMount(c.spec.Security.KeyManagementService.ConnectionDetails)
+					getKEKFromKMSContainer.VolumeMounts = append(getKEKFromKMSContainer.VolumeMounts, vaultVolMount)
+				}
 
 				// Add the container to the list of containers
 				containers = append(containers, getKEKFromKMSContainer)

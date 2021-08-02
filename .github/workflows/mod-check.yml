@@ -1,8 +1,20 @@
 name: Mod check
 on:
+  push:
+    tags:
+      - v*
+    branches:
+      - master
+      - release-*
   pull_request:
-    paths:
-    - '**.go'
+    branches:
+      - master
+      - release-*
+
+defaults:
+  run:
+    # reference: https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions#using-a-specific-shell
+    shell: bash --noprofile --norc -eo pipefail -x {0}
 
 jobs:
   modcheck:
@@ -10,14 +22,15 @@ jobs:
     steps:
     - name: checkout
       uses: actions/checkout@v2
+      with:
+        fetch-depth: 0
 
     - uses: actions/setup-go@v2
       with:
-        go-version: 1.15
+        go-version: 1.16
 
     - name: run mod check
       run: GOPATH=$(go env GOPATH) make -j $(nproc) mod.check
 
     - name: validate modcheck
       run: tests/scripts/validate_modified_files.sh modcheck
-

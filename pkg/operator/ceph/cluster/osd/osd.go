@@ -31,7 +31,6 @@ import (
 	"github.com/coreos/pkg/capnslog"
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	osdconfig "github.com/rook/rook/pkg/operator/ceph/cluster/osd/config"
@@ -76,8 +75,9 @@ type Cluster struct {
 	clusterInfo  *cephclient.ClusterInfo
 	rookVersion  string
 	spec         cephv1.ClusterSpec
-	ValidStorage rookv1.StorageScopeSpec // valid subset of `Storage`, computed at runtime
+	ValidStorage cephv1.StorageScopeSpec // valid subset of `Storage`, computed at runtime
 	kv           *k8sutil.ConfigMapKVStore
+	deviceSets   []deviceSet
 }
 
 // New creates an instance of the OSD manager
@@ -97,6 +97,7 @@ type OSDInfo struct {
 	Cluster        string `json:"cluster"`
 	UUID           string `json:"uuid"`
 	DevicePartUUID string `json:"device-part-uuid"`
+	DeviceClass    string `json:"device-class"`
 	// BlockPath is the logical Volume path for an OSD created by Ceph-volume with format '/dev/<Volume Group>/<Logical Volume>' or simply /dev/vdb if block mode is used
 	BlockPath     string `json:"lv-path"`
 	MetadataPath  string `json:"metadata-path"`
@@ -121,16 +122,16 @@ type OrchestrationStatus struct {
 type osdProperties struct {
 	//crushHostname refers to the hostname or PVC name when the OSD is provisioned on Nodes or PVC block device, respectively.
 	crushHostname       string
-	devices             []rookv1.Device
+	devices             []cephv1.Device
 	pvc                 corev1.PersistentVolumeClaimVolumeSource
 	metadataPVC         corev1.PersistentVolumeClaimVolumeSource
 	walPVC              corev1.PersistentVolumeClaimVolumeSource
 	pvcSize             string
-	selection           rookv1.Selection
+	selection           cephv1.Selection
 	resources           corev1.ResourceRequirements
 	storeConfig         osdconfig.StoreConfig
-	placement           rookv1.Placement
-	preparePlacement    *rookv1.Placement
+	placement           cephv1.Placement
+	preparePlacement    *cephv1.Placement
 	metadataDevice      string
 	portable            bool
 	tuneSlowDeviceClass bool
@@ -152,7 +153,7 @@ func (osdProps osdProperties) onPVCWithWal() bool {
 	return osdProps.walPVC.ClaimName != ""
 }
 
-func (osdProps osdProperties) getPreparePlacement() rookv1.Placement {
+func (osdProps osdProperties) getPreparePlacement() cephv1.Placement {
 	// If the osd prepare placement is specified, use it
 	if osdProps.preparePlacement != nil {
 		return *osdProps.preparePlacement
@@ -168,13 +169,17 @@ func (c *Cluster) Start() error {
 	errs := newProvisionErrors()
 
 	// Validate pod's memory if specified
-	err := controller.CheckPodMemory(cephv1.ResourcesKeyOSD, cephv1.GetOSDResources(c.spec.Resources), cephOsdPodMinimumMemory)
-	if err != nil {
-		return errors.Wrap(err, "failed to check pod memory")
+	for resourceKey, resourceValue := range c.spec.Resources {
+		if strings.HasPrefix(resourceKey, cephv1.ResourcesKeyOSD) {
+			err := controller.CheckPodMemory(resourceKey, resourceValue, cephOsdPodMinimumMemory)
+			if err != nil {
+				return errors.Wrap(err, "failed to check pod memory")
+			}
+		}
 	}
 	logger.Infof("start running osds in namespace %q", namespace)
 
-	if !c.spec.Storage.UseAllNodes && len(c.spec.Storage.Nodes) == 0 && len(c.spec.Storage.VolumeSources) == 0 && len(c.spec.Storage.StorageClassDeviceSets) == 0 {
+	if !c.spec.Storage.UseAllNodes && len(c.spec.Storage.Nodes) == 0 && len(c.spec.Storage.StorageClassDeviceSets) == 0 {
 		logger.Warningf("useAllNodes is set to false and no nodes, storageClassDevicesets or volumeSources are specified, no OSD pods are going to be created")
 	}
 
@@ -234,10 +239,6 @@ func (c *Cluster) Start() error {
 	return nil
 }
 
-func (c *Cluster) shouldProvisionOverPVCs() bool {
-	return len(c.spec.Storage.VolumeSources) > 0 || len(c.spec.Storage.StorageClassDeviceSets) > 0
-}
-
 func (c *Cluster) getExistingOSDDeploymentsOnPVCs() (*util.Set, error) {
 	ctx := context.TODO()
 	listOpts := metav1.ListOptions{LabelSelector: fmt.Sprintf("%s=%s,%s", k8sutil.AppAttr, AppName, OSDOverPVCLabelKey)}
@@ -260,7 +261,7 @@ func (c *Cluster) getExistingOSDDeploymentsOnPVCs() (*util.Set, error) {
 func deploymentOnNode(c *Cluster, osd OSDInfo, nodeName string, config *provisionConfig) (*appsv1.Deployment, error) {
 	osdLongName := fmt.Sprintf("OSD %d on node %q", osd.ID, nodeName)
 
-	osdProps, err := c.getOSDPropsForNode(nodeName)
+	osdProps, err := c.getOSDPropsForNode(nodeName, osd.DeviceClass)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to generate config for %s", osdLongName)
 	}
@@ -268,6 +269,11 @@ func deploymentOnNode(c *Cluster, osd OSDInfo, nodeName string, config *provisio
 	d, err := c.makeDeployment(osdProps, osd, config)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to generate deployment for %s", osdLongName)
+	}
+
+	err = setOSDProperties(c, osdProps, osd)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to prepare deployment for %s", osdLongName)
 	}
 
 	return d, nil
@@ -276,7 +282,7 @@ func deploymentOnNode(c *Cluster, osd OSDInfo, nodeName string, config *provisio
 func deploymentOnPVC(c *Cluster, osd OSDInfo, pvcName string, config *provisionConfig) (*appsv1.Deployment, error) {
 	osdLongName := fmt.Sprintf("OSD %d on PVC %q", osd.ID, pvcName)
 
-	osdProps, err := c.getOSDPropsForPVC(pvcName)
+	osdProps, err := c.getOSDPropsForPVC(pvcName, osd.DeviceClass)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to generate config for %s", osdLongName)
 	}
@@ -286,23 +292,38 @@ func deploymentOnPVC(c *Cluster, osd OSDInfo, pvcName string, config *provisionC
 		return nil, errors.Wrapf(err, "failed to generate deployment for %s", osdLongName)
 	}
 
+	err = setOSDProperties(c, osdProps, osd)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to prepare deployment for %s", osdLongName)
+	}
+
 	return d, nil
 }
 
-func (c *Cluster) resolveNode(nodeName string) *rookv1.Node {
+// setOSDProperties is used to configure an OSD with parameters which can not be set via explicit
+// command-line arguments.
+func setOSDProperties(c *Cluster, osdProps osdProperties, osd OSDInfo) error {
+	// OSD's 'primary-affinity' has to be configured via command which goes through mons
+	if osdProps.storeConfig.PrimaryAffinity != "" {
+		return cephclient.SetPrimaryAffinity(c.context, c.clusterInfo, osd.ID, osdProps.storeConfig.PrimaryAffinity)
+	}
+	return nil
+}
+
+func (c *Cluster) resolveNode(nodeName, deviceClass string) *cephv1.Node {
 	// fully resolve the storage config and resources for this node
 	rookNode := c.ValidStorage.ResolveNode(nodeName)
 	if rookNode == nil {
 		return nil
 	}
-	rookNode.Resources = k8sutil.MergeResourceRequirements(rookNode.Resources, cephv1.GetOSDResources(c.spec.Resources))
+	rookNode.Resources = k8sutil.MergeResourceRequirements(rookNode.Resources, cephv1.GetOSDResources(c.spec.Resources, deviceClass))
 
 	return rookNode
 }
 
-func (c *Cluster) getOSDPropsForNode(nodeName string) (osdProperties, error) {
+func (c *Cluster) getOSDPropsForNode(nodeName, deviceClass string) (osdProperties, error) {
 	// fully resolve the storage config and resources for this node
-	n := c.resolveNode(nodeName)
+	n := c.resolveNode(nodeName, deviceClass)
 	if n == nil {
 		return osdProperties{}, errors.Errorf("failed to resolve node %q", nodeName)
 	}
@@ -321,30 +342,30 @@ func (c *Cluster) getOSDPropsForNode(nodeName string) (osdProperties, error) {
 	return osdProps, nil
 }
 
-func (c *Cluster) getOSDPropsForPVC(pvcName string) (osdProperties, error) {
-	for _, volumeSource := range c.ValidStorage.VolumeSources {
+func (c *Cluster) getOSDPropsForPVC(pvcName, osdDeviceClass string) (osdProperties, error) {
+	for _, deviceSet := range c.deviceSets {
 		// The data PVC template is required.
-		dataSource, dataOK := volumeSource.PVCSources[bluestorePVCData]
+		dataSource, dataOK := deviceSet.PVCSources[bluestorePVCData]
 		if !dataOK {
-			logger.Warningf("failed to find data source daemon for device set %q, missing the data template", volumeSource.Name)
+			logger.Warningf("failed to find data source daemon for device set %q, missing the data template", deviceSet.Name)
 			continue
 		}
 
 		if pvcName == dataSource.ClaimName {
-			metadataSource, metadataOK := volumeSource.PVCSources[bluestorePVCMetadata]
+			metadataSource, metadataOK := deviceSet.PVCSources[bluestorePVCMetadata]
 			if metadataOK {
 				logger.Infof("OSD will have its main bluestore block on %q and its metadata device on %q", dataSource.ClaimName, metadataSource.ClaimName)
 			} else {
 				logger.Infof("OSD will have its main bluestore block on %q", dataSource.ClaimName)
 			}
 
-			walSource, walOK := volumeSource.PVCSources[bluestorePVCWal]
+			walSource, walOK := deviceSet.PVCSources[bluestorePVCWal]
 			if walOK {
 				logger.Infof("OSD will have its wal device on %q", walSource.ClaimName)
 			}
 
-			if volumeSource.Resources.Limits == nil && volumeSource.Resources.Requests == nil {
-				volumeSource.Resources = cephv1.GetOSDResources(c.spec.Resources)
+			if deviceSet.Resources.Limits == nil && deviceSet.Resources.Requests == nil {
+				deviceSet.Resources = cephv1.GetOSDResources(c.spec.Resources, osdDeviceClass)
 			}
 
 			osdProps := osdProperties{
@@ -352,20 +373,23 @@ func (c *Cluster) getOSDPropsForPVC(pvcName string) (osdProperties, error) {
 				pvc:                 dataSource,
 				metadataPVC:         metadataSource,
 				walPVC:              walSource,
-				resources:           volumeSource.Resources,
-				placement:           volumeSource.Placement,
-				preparePlacement:    volumeSource.PreparePlacement,
-				portable:            volumeSource.Portable,
-				tuneSlowDeviceClass: volumeSource.TuneSlowDeviceClass,
-				tuneFastDeviceClass: volumeSource.TuneFastDeviceClass,
-				pvcSize:             volumeSource.Size,
-				schedulerName:       volumeSource.SchedulerName,
-				encrypted:           volumeSource.Encrypted,
-				deviceSetName:       volumeSource.Name,
+				resources:           deviceSet.Resources,
+				placement:           deviceSet.Placement,
+				preparePlacement:    deviceSet.PreparePlacement,
+				portable:            deviceSet.Portable,
+				tuneSlowDeviceClass: deviceSet.TuneSlowDeviceClass,
+				tuneFastDeviceClass: deviceSet.TuneFastDeviceClass,
+				pvcSize:             deviceSet.Size,
+				schedulerName:       deviceSet.SchedulerName,
+				encrypted:           deviceSet.Encrypted,
+				deviceSetName:       deviceSet.Name,
 			}
+			osdProps.storeConfig.InitialWeight = deviceSet.CrushInitialWeight
+			osdProps.storeConfig.PrimaryAffinity = deviceSet.CrushPrimaryAffinity
+
 			// If OSD isn't portable, we're getting the host name either from the osd deployment that was already initialized
 			// or from the osd prepare job from initial creation.
-			if !volumeSource.Portable {
+			if !deviceSet.Portable {
 				var err error
 				osdProps.crushHostname, err = c.getPVCHostName(pvcName)
 				if err != nil {
@@ -415,7 +439,7 @@ func (c *Cluster) getPVCHostName(pvcName string) (string, error) {
 		if name == "" {
 			return "", errors.Errorf("node name not found on the osd pod %q", pod.Name)
 		}
-		return name, nil //nolint, no need for else statement
+		return name, nil //nolint // no need for else statement
 	}
 
 	return "", errors.Errorf("node selector not found on deployment for osd with pvc %q", pvcName)
@@ -471,6 +495,9 @@ func (c *Cluster) getOSDInfo(d *appsv1.Deployment) (OSDInfo, error) {
 		if envVar.Name == osdWalDeviceEnvVarName {
 			osd.WalPath = envVar.Value
 		}
+		if envVar.Name == osdDeviceClassEnvVarName {
+			osd.DeviceClass = envVar.Value
+		}
 	}
 
 	// Needed for upgrade from v1.5 to v1.6. Rook v1.5 did not set ROOK_BLOCK_PATH for OSDs on nodes
@@ -487,6 +514,14 @@ func (c *Cluster) getOSDInfo(d *appsv1.Deployment) (OSDInfo, error) {
 	if osd.CVMode == "" {
 		logger.Infof("required CVMode for OSD %d was not found. assuming this is an LVM OSD", osd.ID)
 		osd.CVMode = "lvm"
+	}
+
+	// if the ROOK_TOPOLOGY_AFFINITY env var was not found in the loop above, detect it from the node
+	if isPVC && osd.TopologyAffinity == "" {
+		osd.TopologyAffinity, err = getTopologyFromNode(c.context.Clientset, d, osd)
+		if err != nil {
+			logger.Errorf("failed to get topology affinity for osd %d. %v", osd.ID, err)
+		}
 	}
 
 	locationFound := false
@@ -583,6 +618,36 @@ func getLocationFromPod(clientset kubernetes.Interface, d *appsv1.Deployment, cr
 	return GetLocationWithNode(clientset, nodeName, crushRoot, hostName)
 }
 
+func getTopologyFromNode(clientset kubernetes.Interface, d *appsv1.Deployment, osd OSDInfo) (string, error) {
+	portable, ok := d.GetLabels()[portableKey]
+	if !ok || portable != "true" {
+		// osd is not portable, no need to load the topology affinity
+		return "", nil
+	}
+	logger.Infof("detecting topology affinity for osd %d after upgrade", osd.ID)
+
+	// Get the osd pod and its assigned node, then look up the node labels
+	ctx := context.TODO()
+	pods, err := clientset.CoreV1().Pods(d.Namespace).List(ctx, metav1.ListOptions{LabelSelector: fmt.Sprintf("%s=%s", OsdIdLabelKey, d.Labels[OsdIdLabelKey])})
+	if err != nil {
+		return "", errors.Wrap(err, "failed to get osd pod")
+	}
+	if len(pods.Items) == 0 {
+		return "", errors.New("an osd pod does not exist")
+	}
+	nodeName := pods.Items[0].Spec.NodeName
+	if nodeName == "" {
+		return "", errors.Errorf("osd %d is not assigned to a node, cannot detect topology affinity", osd.ID)
+	}
+	node, err := getNode(clientset, nodeName)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to get the node for topology affinity")
+	}
+	_, topologyAffinity := ExtractOSDTopologyFromLabels(node.Labels)
+	logger.Infof("found osd %d topology affinity at %q", osd.ID, topologyAffinity)
+	return topologyAffinity, nil
+}
+
 // GetLocationWithNode gets the topology information about the node. The return values are:
 //  location: The CRUSH properties for the OSD to apply
 //  topologyAffinity: The label to be applied to the OSD daemon to guarantee it will start in the same
@@ -590,7 +655,7 @@ func getLocationFromPod(clientset kubernetes.Interface, d *appsv1.Deployment, cr
 func GetLocationWithNode(clientset kubernetes.Interface, nodeName string, crushRoot, crushHostname string) (string, string, error) {
 	node, err := getNode(clientset, nodeName)
 	if err != nil {
-		return "", "", errors.Wrapf(err, "could not get the node for topology labels")
+		return "", "", errors.Wrap(err, "could not get the node for topology labels")
 	}
 
 	// If the operator did not pass a host name, look up the hostname label.

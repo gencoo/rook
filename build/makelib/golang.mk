@@ -48,7 +48,7 @@ GO_TEST_FLAGS ?=
 # ====================================================================================
 # Setup go environment
 
-GO_SUPPORTED_VERSIONS ?= 1.15
+GO_SUPPORTED_VERSIONS ?= 1.16
 
 GO_PACKAGES := $(foreach t,$(GO_SUBDIRS),$(GO_PROJECT)/$(t)/...)
 GO_INTEGRATION_TEST_PACKAGES := $(foreach t,$(GO_INTEGRATION_TESTS_SUBDIRS),$(GO_PROJECT)/$(t)/integration)
@@ -91,8 +91,6 @@ endif
 # NOTE: the install suffixes are matched with the build container to speed up the
 # the build. Please keep them in sync.
 
-# we run go build with -i which on most system's would want to install packages
-# into the system's root dir. using our own pkg dir avoid this
 ifneq ($(GO_PKG_DIR),)
 GO_PKG_BASE_DIR := $(abspath $(GO_PKG_DIR)/$(PLATFORM))
 GO_PKG_STATIC_FLAGS := -pkgdir $(GO_PKG_BASE_DIR)_static
@@ -121,19 +119,21 @@ go.init:
 .PHONY: go.build
 go.build:
 	@echo === go build $(PLATFORM)
-	$(foreach p,$(GO_STATIC_PACKAGES),@CGO_ENABLED=0 $(GO) build -v -i -o $(GO_OUT_DIR)/$(lastword $(subst /, ,$(p)))$(GO_OUT_EXT) $(GO_STATIC_FLAGS) $(p)${\n})
-	$(foreach p,$(GO_TEST_PACKAGES),@CGO_ENABLED=0 $(GO) test -v -i -c -o $(GO_TEST_OUTPUT)/$(lastword $(subst /, ,$(p)))$(GO_OUT_EXT) $(GO_STATIC_FLAGS) $(p)${\n})
+	$(foreach p,$(GO_STATIC_PACKAGES),@CGO_ENABLED=0 $(GO) build -v -o $(GO_OUT_DIR)/$(lastword $(subst /, ,$(p)))$(GO_OUT_EXT) $(GO_STATIC_FLAGS) $(p)${\n})
+	$(foreach p,$(GO_TEST_PACKAGES),@CGO_ENABLED=0 $(GO) test -v -c -o $(GO_TEST_OUTPUT)/$(lastword $(subst /, ,$(p)))$(GO_OUT_EXT) $(GO_STATIC_FLAGS) $(p)${\n})
 
 .PHONY: go.install
 go.install:
 	@echo === go install $(PLATFORM)
 	$(foreach p,$(GO_STATIC_PACKAGES),@CGO_ENABLED=0 $(GO) install -v $(GO_STATIC_FLAGS) $(p)${\n})
 
+# GOJUNIT need to happen in order and NOT in parallel, so call them explicitly
 .PHONY: go.test.unit
-go.test.unit: $(GOJUNIT)
+go.test.unit:
+	@$(MAKE) $(GOJUNIT)
 	@echo === go test unit-tests
 	@mkdir -p $(GO_TEST_OUTPUT)
-	CGO_ENABLED=0 $(GOHOST) test -v -i -cover $(GO_STATIC_FLAGS) $(GO_PACKAGES)
+	CGO_ENABLED=0 $(GOHOST) test -v -cover $(GO_STATIC_FLAGS) $(GO_PACKAGES)
 	CGO_ENABLED=0 $(GOHOST) test -v -cover $(GO_TEST_FLAGS) $(GO_STATIC_FLAGS) $(GO_PACKAGES) 2>&1 | tee $(GO_TEST_OUTPUT)/unit-tests.log
 	@cat $(GO_TEST_OUTPUT)/unit-tests.log | $(GOJUNIT) -set-exit-code > $(GO_TEST_OUTPUT)/unit-tests.xml
 
@@ -195,3 +195,30 @@ $(GOJUNIT):
 	@mkdir -p $(TOOLS_HOST_DIR)/tmp
 	@GOPATH=$(TOOLS_HOST_DIR)/tmp GOBIN=$(TOOLS_HOST_DIR) $(GOHOST) get github.com/jstemmer/go-junit-report
 	@$(GOHOST) clean -modcache
+
+export CONTROLLER_GEN=$(TOOLS_HOST_DIR)/controller-gen-$(CONTROLLER_GEN_VERSION)
+export YQ=$(TOOLS_HOST_DIR)/yq-v3
+$(CONTROLLER_GEN) $(YQ):
+	{ \
+		set -e ;\
+		mkdir -p $(TOOLS_HOST_DIR) ;\
+		CONTROLLER_GEN_TMP_DIR=$$(mktemp -d) ;\
+		cd $$CONTROLLER_GEN_TMP_DIR ;\
+		go mod init tmp;\
+		unset GOOS GOARCH ;\
+		export CGO_ENABLED=0 ;\
+		export GOBIN=$$CONTROLLER_GEN_TMP_DIR ;\
+		echo === installing controller-gen ;\
+		go get sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION);\
+		mv $$CONTROLLER_GEN_TMP_DIR/controller-gen $(CONTROLLER_GEN) ;\
+		echo === installing yq ;\
+		go get github.com/mikefarah/yq/v3;\
+		mv $$CONTROLLER_GEN_TMP_DIR/yq $(YQ) ;\
+		rm -rf $$CONTROLLER_GEN_TMP_DIR ;\
+	}
+
+export CODE_GENERATOR_VERSION=0.20.0
+export CODE_GENERATOR=$(TOOLS_HOST_DIR)/code-generator-$(CODE_GENERATOR_VERSION)
+$(CODE_GENERATOR):
+	mkdir -p $(TOOLS_HOST_DIR)
+	curl -sL https://github.com/kubernetes/code-generator/archive/refs/tags/v${CODE_GENERATOR_VERSION}.tar.gz | tar -xz -C $(TOOLS_HOST_DIR)

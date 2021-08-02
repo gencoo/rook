@@ -19,16 +19,20 @@ package k8sutil
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	netapi "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
+	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
+	"github.com/rook/rook/pkg/apis/rook.io"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
 	// publicNetworkSelectorKeyName is the network selector key for the ceph public network
 	publicNetworkSelectorKeyName = "public"
+	// clusterNetworkSelectorKeyName is the network selector key for the ceph cluster network
+	clusterNetworkSelectorKeyName = "cluster"
 )
 
 // NetworkAttachmentConfig represents the configuration of the NetworkAttachmentDefinitions object
@@ -62,7 +66,7 @@ type NetworkAttachmentConfig struct {
 
 // ApplyMultus apply multus selector to Pods
 // Multus supports short and json syntax, use only one kind at a time.
-func ApplyMultus(net rookv1.NetworkSpec, objectMeta *metav1.ObjectMeta) error {
+func ApplyMultus(net cephv1.NetworkSpec, objectMeta *metav1.ObjectMeta) error {
 	v := make([]string, 0, 2)
 	shortSyntax := false
 	jsonSyntax := false
@@ -77,13 +81,16 @@ func ApplyMultus(net rookv1.NetworkSpec, objectMeta *metav1.ObjectMeta) error {
 			shortSyntax = true
 		}
 
-		isCsi := strings.Contains(objectMeta.Labels["app"], "csi-")
-		if isCsi {
+		var isExcluded bool
+		for _, clusterNetworkApps := range getClusterNetworkApps() {
+			isExcluded = strings.Contains(objectMeta.Labels["app"], clusterNetworkApps)
+		}
+		if isExcluded {
+			v = append(v, string(ns))
+		} else {
 			if k == publicNetworkSelectorKeyName {
 				v = append(v, string(ns))
 			}
-		} else {
-			v = append(v, string(ns))
 		}
 	}
 
@@ -91,17 +98,25 @@ func ApplyMultus(net rookv1.NetworkSpec, objectMeta *metav1.ObjectMeta) error {
 		return fmt.Errorf("ApplyMultus: Can't mix short and JSON form")
 	}
 
+	// Sort network strings so that pods/deployments won't need updated in a loop if nothing changes
+	sort.Strings(v)
+
 	networks := strings.Join(v, ", ")
 	if jsonSyntax {
 		networks = "[" + networks + "]"
 	}
 
-	t := rookv1.Annotations{
+	t := rook.Annotations{
 		"k8s.v1.cni.cncf.io/networks": networks,
 	}
 	t.ApplyToObjectMeta(objectMeta)
 
 	return nil
+}
+
+// getClusterNetworkApps returns the list of ceph apps that utilize cluster network
+func getClusterNetworkApps() []string {
+	return []string{"osd"}
 }
 
 // GetNetworkAttachmentConfig returns the NetworkAttachmentDefinitions configuration

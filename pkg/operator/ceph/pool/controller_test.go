@@ -24,10 +24,10 @@ import (
 	"github.com/coreos/pkg/capnslog"
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	rookclient "github.com/rook/rook/pkg/client/clientset/versioned/fake"
 	"github.com/rook/rook/pkg/clusterd"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
+	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	testop "github.com/rook/rook/pkg/operator/test"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
@@ -45,7 +45,7 @@ import (
 func TestCreatePool(t *testing.T) {
 	clusterInfo := &cephclient.ClusterInfo{Namespace: "myns"}
 	executor := &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(command, outfile string, args ...string) (string, error) {
+		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
 			logger.Infof("Command: %s %v", command, args)
 			if command == "ceph" && args[1] == "erasure-code-profile" {
 				return `{"k":"2","m":"1","plugin":"jerasure","technique":"reed_sol_van"}`, nil
@@ -59,7 +59,7 @@ func TestCreatePool(t *testing.T) {
 	p.Spec.Replicated.Size = 1
 	p.Spec.Replicated.RequireSafeReplicaSize = false
 
-	clusterSpec := &cephv1.ClusterSpec{Storage: rookv1.StorageScopeSpec{Config: map[string]string{cephclient.CrushRootConfigKey: "cluster-crush-root"}}}
+	clusterSpec := &cephv1.ClusterSpec{Storage: cephv1.StorageScopeSpec{Config: map[string]string{cephclient.CrushRootConfigKey: "cluster-crush-root"}}}
 	err := createPool(context, clusterInfo, clusterSpec, p)
 	assert.Nil(t, err)
 
@@ -75,31 +75,24 @@ func TestDeletePool(t *testing.T) {
 	failOnDelete := false
 	clusterInfo := &cephclient.ClusterInfo{Namespace: "myns"}
 	executor := &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(command, outfile string, args ...string) (string, error) {
-			if command == "ceph" && args[1] == "lspools" {
-				return `[{"poolnum":1,"poolname":"mypool"}]`, nil
-			} else if command == "ceph" && args[1] == "pool" && args[2] == "get" {
-				return `{"pool": "mypool","pool_id": 1,"size":1}`, nil
-			}
-
-			return "", nil
-		},
 		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
 			emptyPool := "{\"images\":{\"count\":0,\"provisioned_bytes\":0,\"snap_count\":0},\"trash\":{\"count\":1,\"provisioned_bytes\":2048,\"snap_count\":0}}"
 			p := "{\"images\":{\"count\":1,\"provisioned_bytes\":1024,\"snap_count\":0},\"trash\":{\"count\":1,\"provisioned_bytes\":2048,\"snap_count\":0}}"
 			logger.Infof("Command: %s %v", command, args)
-
-			if args[0] == "pool" {
+			if command == "ceph" && args[1] == "lspools" {
+				return `[{"poolnum":1,"poolname":"mypool"}]`, nil
+			} else if command == "ceph" && args[1] == "pool" && args[2] == "get" {
+				return `{"pool": "mypool","pool_id": 1,"size":1}`, nil
+			} else if command == "ceph" && args[1] == "pool" && args[2] == "delete" {
+				return "", nil
+			} else if args[0] == "pool" {
 				if args[1] == "stats" {
 					if !failOnDelete {
 						return emptyPool, nil
 					}
-
 					return p, nil
-
 				}
 				return "", errors.Errorf("rbd: error opening pool %q: (2) No such file or directory", args[3])
-
 			}
 			return "", errors.Errorf("unexpected rbd command %q", args)
 		},
@@ -154,6 +147,9 @@ func TestCephBlockPoolController(t *testing.T) {
 			Replicated: cephv1.ReplicatedSpec{
 				Size: replicas,
 			},
+			Mirroring: cephv1.MirroringSpec{
+				Peers: &cephv1.MirroringPeerSpec{},
+			},
 			StatusCheck: cephv1.MirrorHealthCheckSpec{
 				Mirror: cephv1.HealthCheckSpec{
 					Disabled: true,
@@ -171,7 +167,7 @@ func TestCephBlockPoolController(t *testing.T) {
 	}
 
 	executor := &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(command, outfile string, args ...string) (string, error) {
+		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
 			if args[0] == "status" {
 				return `{"fsid":"c47cac40-9bee-4d52-823b-ccd803ba5bfe","health":{"checks":{},"status":"HEALTH_ERR"},"pgmap":{"num_pgs":100,"pgs_by_state":[{"state_name":"active+clean","count":100}]}}`, nil
 			}
@@ -275,7 +271,7 @@ func TestCephBlockPoolController(t *testing.T) {
 	c.Client = cl
 
 	executor = &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(command, outfile string, args ...string) (string, error) {
+		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
 			if args[0] == "status" {
 				return `{"fsid":"c47cac40-9bee-4d52-823b-ccd803ba5bfe","health":{"checks":{},"status":"HEALTH_OK"},"pgmap":{"num_pgs":100,"pgs_by_state":[{"state_name":"active+clean","count":100}]}}`, nil
 			}
@@ -352,6 +348,7 @@ func TestCephBlockPoolController(t *testing.T) {
 	}
 
 	pool.Spec.Mirroring.Mode = "image"
+	pool.Spec.Mirroring.Peers.SecretNames = []string{}
 	err = r.client.Update(context.TODO(), pool)
 	assert.NoError(t, err)
 	for i := 0; i < 5; i++ {
@@ -361,20 +358,81 @@ func TestCephBlockPoolController(t *testing.T) {
 		err = r.client.Get(context.TODO(), req.NamespacedName, pool)
 		assert.NoError(t, err)
 		assert.Equal(t, cephv1.ConditionReady, pool.Status.Phase)
-		if _, ok := pool.Status.Info[RBDMirrorBootstrapPeerSecretName]; ok {
+		if _, ok := pool.Status.Info[opcontroller.RBDMirrorBootstrapPeerSecretName]; ok {
 			break
 		}
 		logger.Infof("FIX: trying again to update the mirroring status")
 	}
-	assert.NotEmpty(t, pool.Status.Info[RBDMirrorBootstrapPeerSecretName], pool.Status.Info)
+	assert.NotEmpty(t, pool.Status.Info[opcontroller.RBDMirrorBootstrapPeerSecretName], pool.Status.Info)
 
 	// fetch the secret
-	myPeerSecret, err := c.Clientset.CoreV1().Secrets(namespace).Get(ctx, pool.Status.Info[RBDMirrorBootstrapPeerSecretName], metav1.GetOptions{})
+	myPeerSecret, err := c.Clientset.CoreV1().Secrets(namespace).Get(ctx, pool.Status.Info[opcontroller.RBDMirrorBootstrapPeerSecretName], metav1.GetOptions{})
 	assert.NoError(t, err)
 	if myPeerSecret != nil {
 		assert.NotEmpty(t, myPeerSecret.Data["token"], myPeerSecret.Data)
 		assert.NotEmpty(t, myPeerSecret.Data["pool"])
 	}
+
+	//
+	// TEST 6: Import peer token
+
+	// Create a fake client to mock API calls.
+	cl = fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(object...).Build()
+
+	// Create a ReconcileCephBlockPool object with the scheme and fake client.
+	r = &ReconcileCephBlockPool{
+		client:            cl,
+		scheme:            s,
+		context:           c,
+		blockPoolChannels: make(map[string]*blockPoolHealth),
+	}
+
+	peerSecretName := "peer-secret"
+	pool.Spec.Mirroring.Peers.SecretNames = []string{peerSecretName}
+	err = r.client.Update(context.TODO(), pool)
+	assert.NoError(t, err)
+	res, err = r.Reconcile(ctx, req)
+	// assert reconcile failure because peer token secert was not created
+	assert.Error(t, err)
+	assert.True(t, res.Requeue)
+
+	bootstrapPeerToken := `eyJmc2lkIjoiYzZiMDg3ZjItNzgyOS00ZGJiLWJjZmMtNTNkYzM0ZTBiMzVkIiwiY2xpZW50X2lkIjoicmJkLW1pcnJvci1wZWVyIiwia2V5IjoiQVFBV1lsWmZVQ1Q2RGhBQVBtVnAwbGtubDA5YVZWS3lyRVV1NEE9PSIsIm1vbl9ob3N0IjoiW3YyOjE5Mi4xNjguMTExLjEwOjMzMDAsdjE6MTkyLjE2OC4xMTEuMTA6Njc4OV0sW3YyOjE5Mi4xNjguMTExLjEyOjMzMDAsdjE6MTkyLjE2OC4xMTEuMTI6Njc4OV0sW3YyOjE5Mi4xNjguMTExLjExOjMzMDAsdjE6MTkyLjE2OC4xMTEuMTE6Njc4OV0ifQ==` //nolint:gosec // This is just a var name, not a real token
+	peerSecret := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      peerSecretName,
+			Namespace: namespace,
+		},
+		Data: map[string][]byte{"token": []byte(bootstrapPeerToken), "pool": []byte("goo")},
+		Type: k8sutil.RookType,
+	}
+	_, err = c.Clientset.CoreV1().Secrets(namespace).Create(ctx, peerSecret, metav1.CreateOptions{})
+	assert.NoError(t, err)
+	res, err = r.Reconcile(ctx, req)
+	assert.NoError(t, err)
+	assert.False(t, res.Requeue)
+	err = r.client.Get(context.TODO(), req.NamespacedName, pool)
+	assert.NoError(t, err)
+
+	//
+	// TEST 7: Mirroring disabled
+	r = &ReconcileCephBlockPool{
+		client:            cl,
+		scheme:            s,
+		context:           c,
+		blockPoolChannels: make(map[string]*blockPoolHealth),
+	}
+	pool.Spec.Mirroring.Enabled = false
+	pool.Spec.Mirroring.Mode = "image"
+	err = r.client.Update(context.TODO(), pool)
+	assert.NoError(t, err)
+	res, err = r.Reconcile(ctx, req)
+	assert.NoError(t, err)
+	assert.False(t, res.Requeue)
+	err = r.client.Get(context.TODO(), req.NamespacedName, pool)
+	assert.NoError(t, err)
+	assert.Equal(t, cephv1.ConditionReady, pool.Status.Phase)
+
+	assert.Nil(t, pool.Status.MirroringStatus)
 }
 
 func TestConfigureRBDStats(t *testing.T) {
@@ -385,7 +443,7 @@ func TestConfigureRBDStats(t *testing.T) {
 	)
 
 	executor := &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(command, outfile string, args ...string) (string, error) {
+		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
 			logger.Infof("Command: %s %v", command, args)
 			switch {
 			case args[0] == "config" && args[1] == "set" && args[2] == "mgr." && args[3] == "mgr/prometheus/rbd_stats_pools" && args[4] != "":
@@ -447,11 +505,11 @@ func TestConfigureRBDStats(t *testing.T) {
 	assert.Nil(t, err)
 
 	// Case 5: Two CephBlockPools with EnableRBDStats:false & EnableRBDStats:true.
-	// MgrSetConfig returns an error
+	// SetConfig returns an error
 	context.Executor = &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(command, outfile string, args ...string) (string, error) {
+		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
 			logger.Infof("Command: %s %v", command, args)
-			return "", errors.Errorf("mock error to simulate failure of MgrSetConfig() function")
+			return "", errors.New("mock error to simulate failure of SetConfig() function")
 		},
 	}
 	err = configureRBDStats(context, clusterInfo)

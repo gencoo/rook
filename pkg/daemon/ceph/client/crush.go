@@ -115,7 +115,6 @@ func GetCompiledCrushMap(context *clusterd.Context, clusterInfo *ClusterInfo) (s
 
 	args := []string{"osd", "getcrushmap", "--out-file", compiledCrushMapFile.Name()}
 	exec := NewCephCommand(context, clusterInfo, args)
-	exec.OutputFile = false
 	exec.JsonOutput = false
 	buf, err := exec.Run()
 	if err != nil {
@@ -199,6 +198,7 @@ func formatProperty(name, value string) string {
 
 // GetOSDOnHost returns the list of osds running on a given host
 func GetOSDOnHost(context *clusterd.Context, clusterInfo *ClusterInfo, node string) (string, error) {
+	node = NormalizeCrushName(node)
 	args := []string{"osd", "crush", "ls", node}
 	buf, err := NewCephCommand(context, clusterInfo, args).Run()
 	if err != nil {
@@ -233,7 +233,6 @@ func decompileCRUSHMap(context *clusterd.Context, crushMapPath string) error {
 func injectCRUSHMap(context *clusterd.Context, clusterInfo *ClusterInfo, crushMapPath string) error {
 	args := []string{"osd", "setcrushmap", "--in-file", crushMapPath}
 	exec := NewCephCommand(context, clusterInfo, args)
-	exec.OutputFile = false
 	exec.JsonOutput = false
 	buf, err := exec.Run()
 	if err != nil {
@@ -246,7 +245,6 @@ func injectCRUSHMap(context *clusterd.Context, clusterInfo *ClusterInfo, crushMa
 func setCRUSHMap(context *clusterd.Context, clusterInfo *ClusterInfo, crushMapPath string) error {
 	args := []string{"osd", "crush", "set", crushMapPath}
 	exec := NewCephCommand(context, clusterInfo, args)
-	exec.OutputFile = false
 	exec.JsonOutput = false
 	buf, err := exec.Run()
 	if err != nil {

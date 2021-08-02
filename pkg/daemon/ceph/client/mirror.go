@@ -44,7 +44,7 @@ func ImportRBDMirrorBootstrapPeer(context *clusterd.Context, clusterInfo *Cluste
 	defer func() error {
 		err := os.Remove(tokenFilePath)
 		return err
-	}() //nolint, we don't want to return here
+	}() //nolint // we don't want to return here
 
 	// Build command
 	args := []string{"mirror", "pool", "peer", "bootstrap", "import", poolName, tokenFilePath}
@@ -59,6 +59,7 @@ func ImportRBDMirrorBootstrapPeer(context *clusterd.Context, clusterInfo *Cluste
 		return errors.Wrapf(err, "failed to add rbd-mirror peer token for pool %q. %s", poolName, output)
 	}
 
+	logger.Infof("successfully added rbd-mirror peer token for pool %q", poolName)
 	return nil
 }
 
@@ -67,15 +68,16 @@ func CreateRBDMirrorBootstrapPeer(context *clusterd.Context, clusterInfo *Cluste
 	logger.Infof("create rbd-mirror bootstrap peer token for pool %q", poolName)
 
 	// Build command
-	args := []string{"mirror", "pool", "peer", "bootstrap", "create", poolName, "--site-name", fmt.Sprintf("%s-%s", clusterInfo.FSID, clusterInfo.Namespace)}
+	args := []string{"mirror", "pool", "peer", "bootstrap", "create", poolName}
 	cmd := NewRBDCommand(context, clusterInfo, args)
 
 	// Run command
 	output, err := cmd.Run()
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to create rbd-mirror peer token  for pool %q. %s", poolName, output)
+		return nil, errors.Wrapf(err, "failed to create rbd-mirror peer token for pool %q. %s", poolName, output)
 	}
 
+	logger.Infof("successfully created rbd-mirror bootstrap peer token for pool %q", poolName)
 	return output, nil
 }
 
@@ -91,6 +93,39 @@ func enablePoolMirroring(context *clusterd.Context, clusterInfo *ClusterInfo, po
 	output, err := cmd.Run()
 	if err != nil {
 		return errors.Wrapf(err, "failed to enable mirroring type %q for pool %q. %s", pool.Mirroring.Mode, poolName, output)
+	}
+
+	return nil
+}
+
+// disablePoolMirroring turns off mirroring on a pool
+func disablePoolMirroring(context *clusterd.Context, clusterInfo *ClusterInfo, poolName string) error {
+	logger.Infof("disabling mirroring for pool %q", poolName)
+
+	// Build command
+	args := []string{"mirror", "pool", "disable", poolName}
+	cmd := NewRBDCommand(context, clusterInfo, args)
+
+	// Run command
+	output, err := cmd.Run()
+	if err != nil {
+		return errors.Wrapf(err, "failed to disable mirroring for pool %q. %s", poolName, output)
+	}
+
+	return nil
+}
+
+func removeClusterPeer(context *clusterd.Context, clusterInfo *ClusterInfo, poolName, peerUUID string) error {
+	logger.Infof("removing cluster peer with UUID %q for the pool %q", peerUUID, poolName)
+
+	// Build command
+	args := []string{"mirror", "pool", "peer", "remove", poolName, peerUUID}
+	cmd := NewRBDCommand(context, clusterInfo, args)
+
+	// Run command
+	output, err := cmd.Run()
+	if err != nil {
+		return errors.Wrapf(err, "failed to remove cluster peer with UUID %q for the pool %q. %s", peerUUID, poolName, output)
 	}
 
 	return nil

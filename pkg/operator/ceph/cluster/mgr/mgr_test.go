@@ -24,11 +24,12 @@ import (
 	"testing"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
+	"github.com/rook/rook/pkg/apis/rook.io"
 	"github.com/rook/rook/pkg/clusterd"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	testopk8s "github.com/rook/rook/pkg/operator/k8sutil/test"
 	testop "github.com/rook/rook/pkg/operator/test"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
@@ -36,9 +37,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tevino/abool"
 	apps "k8s.io/api/apps/v1"
-	v1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -47,11 +46,15 @@ func TestStartMgr(t *testing.T) {
 	updateDeploymentAndWait, deploymentsUpdated = testopk8s.UpdateDeploymentAndWaitStub()
 
 	executor := &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(command string, outFileArg string, args ...string) (string, error) {
+		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
+			logger.Infof("Execute: %s %v", command, args)
+			if args[0] == "mgr" && args[1] == "stat" {
+				return `{"active_name": "a"}`, nil
+			}
 			return "{\"key\":\"mysecurekey\"}", nil
 		},
 	}
-	waitForDeploymentToStart = func(clusterdContext *clusterd.Context, deployment *v1.Deployment) error {
+	waitForDeploymentToStart = func(clusterdContext *clusterd.Context, deployment *apps.Deployment) error {
 		logger.Infof("simulated mgr deployment starting")
 		return nil
 	}
@@ -65,14 +68,14 @@ func TestStartMgr(t *testing.T) {
 		Clientset:                  clientset,
 		RequestCancelOrchestration: abool.New()}
 	ownerInfo := cephclient.NewMinimumOwnerInfo(t)
-	clusterInfo := &cephclient.ClusterInfo{Namespace: "ns", FSID: "myfsid", OwnerInfo: ownerInfo}
+	clusterInfo := &cephclient.ClusterInfo{Namespace: "ns", FSID: "myfsid", OwnerInfo: ownerInfo, CephVersion: cephver.CephVersion{Major: 16, Minor: 2, Build: 5}}
 	clusterInfo.SetName("test")
 	clusterSpec := cephv1.ClusterSpec{
-		Annotations:        map[rookv1.KeyType]rookv1.Annotations{cephv1.KeyMgr: {"my": "annotation"}},
-		Labels:             map[rookv1.KeyType]rookv1.Labels{cephv1.KeyMgr: {"my-label-key": "value"}},
+		Annotations:        map[rook.KeyType]rook.Annotations{cephv1.KeyMgr: {"my": "annotation"}},
+		Labels:             map[rook.KeyType]rook.Labels{cephv1.KeyMgr: {"my-label-key": "value"}},
 		Dashboard:          cephv1.DashboardSpec{Enabled: true, SSL: true},
 		Mgr:                cephv1.MgrSpec{Count: 1},
-		PriorityClassNames: map[rookv1.KeyType]string{cephv1.KeyMgr: "my-priority-class"},
+		PriorityClassNames: map[rook.KeyType]string{cephv1.KeyMgr: "my-priority-class"},
 		DataDirHostPath:    "/var/lib/rook/",
 	}
 	c := New(ctx, clusterInfo, clusterSpec, "myversion")
@@ -101,13 +104,8 @@ func TestStartMgr(t *testing.T) {
 	assert.Nil(t, err)
 	err = c.Start()
 	assert.Nil(t, err)
-	// trigger the sidecar reconcile since the operator didn't do it so we can perform the full validation
-	err = c.reconcileService("a")
-	assert.Nil(t, err)
 	validateStart(t, c)
 
-	// the dashboard service is only deleted by the operator reconcile if the replicas are 1,
-	// otherwise the sidecar has the responsibility
 	c.spec.Mgr.Count = 1
 	c.spec.Dashboard.Enabled = false
 	// clean the previous deployments
@@ -179,7 +177,7 @@ func TestMgrSidecarReconcile(t *testing.T) {
 		},
 	}
 	executor := &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(command, outFile string, args ...string) (string, error) {
+		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
 			logger.Infof("Command: %s %v", command, args)
 			if args[1] == "dump" {
 				calledMgrDump = true
@@ -203,7 +201,8 @@ func TestMgrSidecarReconcile(t *testing.T) {
 	c := &Cluster{spec: spec, context: ctx, clusterInfo: clusterInfo}
 
 	// Update services according to the active mgr
-	err := c.ReconcileMultipleServices(activeMgr, false)
+	clusterInfo.CephVersion = cephver.CephVersion{Major: 15, Minor: 2, Build: 0}
+	err := c.ReconcileActiveMgrServices(activeMgr)
 	assert.NoError(t, err)
 	assert.False(t, calledMgrStat)
 	assert.True(t, calledMgrDump)
@@ -212,16 +211,17 @@ func TestMgrSidecarReconcile(t *testing.T) {
 
 	// nothing is created or updated when the requested mgr is not the active mgr
 	calledMgrDump = false
-	err = c.ReconcileMultipleServices("b", true)
+	clusterInfo.CephVersion = cephver.CephVersion{Major: 16, Minor: 2, Build: 5}
+	err = c.ReconcileActiveMgrServices("b")
 	assert.NoError(t, err)
 	assert.True(t, calledMgrStat)
 	assert.False(t, calledMgrDump)
 	_, err = c.context.Clientset.CoreV1().Services(c.clusterInfo.Namespace).Get(context.TODO(), "rook-ceph-mgr", metav1.GetOptions{})
-	assert.True(t, kerrors.IsNotFound(err))
+	assert.True(t, errors.IsNotFound(err))
 
 	// nothing is updated when the requested mgr is not the active mgr
 	activeMgr = "b"
-	err = c.ReconcileMultipleServices("b", true)
+	err = c.ReconcileActiveMgrServices("b")
 	assert.NoError(t, err)
 	validateServices(t, c)
 	validateServiceMatches(t, c, "b")
@@ -246,7 +246,7 @@ func TestConfigureModules(t *testing.T) {
 	configSettings := map[string]string{}
 	lastModuleConfigured := ""
 	executor := &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(command string, outFileArg string, args ...string) (string, error) {
+		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
 			logger.Infof("Command: %s %v", command, args)
 			if command == "ceph" && len(args) > 3 {
 				if args[0] == "mgr" && args[1] == "module" {
@@ -328,4 +328,40 @@ func TestMgrDaemons(t *testing.T) {
 	require.Equal(t, 2, len(daemons))
 	assert.Equal(t, "a", daemons[0])
 	assert.Equal(t, "b", daemons[1])
+}
+
+func TestApplyMonitoringLabels(t *testing.T) {
+	clusterSpec := cephv1.ClusterSpec{
+		Labels: cephv1.LabelsSpec{},
+	}
+	c := &Cluster{spec: clusterSpec}
+	sm := &monitoringv1.ServiceMonitor{Spec: monitoringv1.ServiceMonitorSpec{
+		Endpoints: []monitoringv1.Endpoint{{}}}}
+
+	// Service Monitor RelabelConfigs updated when 'rook.io/managedBy' monitoring label is found
+	monitoringLabels := cephv1.LabelsSpec{
+		cephv1.KeyMonitoring: map[string]string{
+			"rook.io/managedBy": "storagecluster"},
+	}
+	c.spec.Labels = monitoringLabels
+	applyMonitoringLabels(c, sm)
+	fmt.Printf("Hello1")
+	assert.Equal(t, "managedBy", sm.Spec.Endpoints[0].RelabelConfigs[0].TargetLabel)
+	assert.Equal(t, "storagecluster", sm.Spec.Endpoints[0].RelabelConfigs[0].Replacement)
+
+	// Service Monitor RelabelConfigs not updated when the required monitoring label is not found
+	monitoringLabels = cephv1.LabelsSpec{
+		cephv1.KeyMonitoring: map[string]string{
+			"wrongLabelKey": "storagecluster"},
+	}
+	c.spec.Labels = monitoringLabels
+	sm.Spec.Endpoints[0].RelabelConfigs = nil
+	applyMonitoringLabels(c, sm)
+	assert.Nil(t, sm.Spec.Endpoints[0].RelabelConfigs)
+
+	// Service Monitor RelabelConfigs not updated when no monitoring labels are found
+	c.spec.Labels = cephv1.LabelsSpec{}
+	sm.Spec.Endpoints[0].RelabelConfigs = nil
+	applyMonitoringLabels(c, sm)
+	assert.Nil(t, sm.Spec.Endpoints[0].RelabelConfigs)
 }
