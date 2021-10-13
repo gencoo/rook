@@ -33,7 +33,7 @@ kubectl -n rook-ceph exec -it $(kubectl -n rook-ceph get pod -l "app=rook-ceph-t
 
 ## Add an OSD
 
-The [QuickStart Guide](ceph-quickstart.md) will provide the basic steps to create a cluster and start some OSDs. For more details on the OSD
+The [QuickStart Guide](quickstart.md) will provide the basic steps to create a cluster and start some OSDs. For more details on the OSD
 settings also see the [Cluster CRD](ceph-cluster-crd.md) documentation. If you are not seeing OSDs created, see the [Ceph Troubleshooting Guide](ceph-common-issues.md).
 
 To add more OSDs, Rook will automatically watch for new nodes and devices being added to your cluster.
@@ -70,10 +70,10 @@ If you are using `useAllDevices: true`, no change to the CR is necessary.
 removal steps in order to prevent Rook from detecting the old OSD and trying to re-create it before
 the disk is wiped or removed.**
 
-To stop the Rook Operator, run 
+To stop the Rook Operator, run
 `kubectl -n rook-ceph scale deployment rook-ceph-operator --replicas=0`.
 
-You must perform steps below to (1) purge the OSD and either (2.a) delete the underlying data or 
+You must perform steps below to (1) purge the OSD and either (2.a) delete the underlying data or
 (2.b)replace the disk before starting the Rook Operator again.
 
 Once you have done that, you can start the Rook operator again with
@@ -83,7 +83,7 @@ Once you have done that, you can start the Rook operator again with
 
 To reduce the storage in your cluster or remove a failed OSD on a PVC:
 
-1. Shrink the number of OSDs in the `storageClassDeviceSet` in the CephCluster CR. If you have multiple device sets,
+1. Shrink the number of OSDs in the `storageClassDeviceSets` in the CephCluster CR. If you have multiple device sets,
    you may need to change the index of `0` in this example path.
    - `kubectl -n rook-ceph patch CephCluster rook-ceph --type=json -p '[{"op": "replace", "path": "/spec/storage/storageClassDeviceSets/0/count", "value":<desired number>}]'`
    - Reduce the `count` of the OSDs to the desired number. Rook will not take any action to automatically remove the extra OSD(s).

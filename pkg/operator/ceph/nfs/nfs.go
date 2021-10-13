@@ -18,8 +18,8 @@ limitations under the License.
 package nfs
 
 import (
-	"context"
 	"fmt"
+	"strings"
 
 	"github.com/banzaicloud/k8s-objectmatcher/patch"
 	"github.com/pkg/errors"
@@ -37,6 +37,10 @@ import (
 
 const (
 	ganeshaRadosGraceCmd = "ganesha-rados-grace"
+	// Default RADOS pool name after the NFS changes in Ceph
+	postNFSChangeDefaultPoolName = ".nfs"
+	// Default RADOS pool name before the NFS changes in Ceph
+	preNFSChangeDefaultPoolName = "nfs-ganesha"
 )
 
 var updateDeploymentAndWait = opmon.UpdateCephDeploymentAndWait
@@ -49,7 +53,6 @@ type daemonConfig struct {
 
 // Create the ganesha server
 func (r *ReconcileCephNFS) upCephNFS(n *cephv1.CephNFS) error {
-	ctx := context.TODO()
 	for i := 0; i < n.Spec.Server.Active; i++ {
 		id := k8sutil.IndexToName(i)
 
@@ -96,7 +99,7 @@ func (r *ReconcileCephNFS) upCephNFS(n *cephv1.CephNFS) error {
 		}
 
 		// start the deployment
-		_, err = r.context.Clientset.AppsV1().Deployments(n.Namespace).Create(ctx, deployment, metav1.CreateOptions{})
+		_, err = r.context.Clientset.AppsV1().Deployments(n.Namespace).Create(r.opManagerContext, deployment, metav1.CreateOptions{})
 		if err != nil {
 			if !kerrors.IsAlreadyExists(err) {
 				return errors.Wrap(err, "failed to create ceph nfs deployment")
@@ -189,7 +192,6 @@ func (r *ReconcileCephNFS) generateConfigMap(n *cephv1.CephNFS, name string) *v1
 }
 
 func (r *ReconcileCephNFS) createConfigMap(n *cephv1.CephNFS, name string) (string, error) {
-	ctx := context.TODO()
 	// Generate configMap
 	configMap := r.generateConfigMap(n, name)
 
@@ -199,13 +201,13 @@ func (r *ReconcileCephNFS) createConfigMap(n *cephv1.CephNFS, name string) (stri
 		return "", errors.Wrapf(err, "failed to set owner reference for ceph ganesha configmap %q", configMap.Name)
 	}
 
-	if _, err := r.context.Clientset.CoreV1().ConfigMaps(n.Namespace).Create(ctx, configMap, metav1.CreateOptions{}); err != nil {
+	if _, err := r.context.Clientset.CoreV1().ConfigMaps(n.Namespace).Create(r.opManagerContext, configMap, metav1.CreateOptions{}); err != nil {
 		if !kerrors.IsAlreadyExists(err) {
 			return "", errors.Wrap(err, "failed to create ganesha config map")
 		}
 
 		logger.Debugf("updating config map %q that already exists", configMap.Name)
-		if _, err = r.context.Clientset.CoreV1().ConfigMaps(n.Namespace).Update(ctx, configMap, metav1.UpdateOptions{}); err != nil {
+		if _, err = r.context.Clientset.CoreV1().ConfigMaps(n.Namespace).Update(r.opManagerContext, configMap, metav1.UpdateOptions{}); err != nil {
 			return "", errors.Wrap(err, "failed to update ganesha config map")
 		}
 	}
@@ -215,7 +217,6 @@ func (r *ReconcileCephNFS) createConfigMap(n *cephv1.CephNFS, name string) (stri
 
 // Down scale the ganesha server
 func (r *ReconcileCephNFS) downCephNFS(n *cephv1.CephNFS, nfsServerListNum int) error {
-	ctx := context.TODO()
 	diffCount := nfsServerListNum - n.Spec.Server.Active
 	for i := 0; i < diffCount; {
 		depIDToRemove := nfsServerListNum - 1
@@ -225,7 +226,7 @@ func (r *ReconcileCephNFS) downCephNFS(n *cephv1.CephNFS, nfsServerListNum int) 
 
 		// Remove deployment
 		logger.Infof("removing deployment %q", depNameToRemove)
-		err := r.context.Clientset.AppsV1().Deployments(n.Namespace).Delete(ctx, depNameToRemove, metav1.DeleteOptions{})
+		err := r.context.Clientset.AppsV1().Deployments(n.Namespace).Delete(r.opManagerContext, depNameToRemove, metav1.DeleteOptions{})
 		if err != nil {
 			if !kerrors.IsNotFound(err) {
 				return errors.Wrap(err, "failed to delete ceph nfs deployment")
@@ -268,16 +269,45 @@ func validateGanesha(context *clusterd.Context, clusterInfo *cephclient.ClusterI
 		return errors.New("missing RADOS.pool")
 	}
 
+	if n.Spec.RADOS.Namespace == "" {
+		return errors.New("missing RADOS.namespace")
+	}
+
 	// Ganesha server properties
 	if n.Spec.Server.Active == 0 {
 		return errors.New("at least one active server required")
 	}
 
+	return nil
+}
+
+// create and enable default RADOS pool
+func createDefaultNFSRADOSPool(context *clusterd.Context, clusterInfo *cephclient.ClusterInfo, defaultRadosPoolName string) error {
+	args := []string{"osd", "pool", "create", defaultRadosPoolName}
+	_, err := cephclient.NewCephCommand(context, clusterInfo, args).Run()
+	if err != nil {
+		return err
+	}
+	args = []string{"osd", "pool", "application", "enable", defaultRadosPoolName, "nfs"}
+	_, err = cephclient.NewCephCommand(context, clusterInfo, args).Run()
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func fetchOrCreatePool(context *clusterd.Context, clusterInfo *cephclient.ClusterInfo, n *cephv1.CephNFS) error {
 	// The existence of the pool provided in n.Spec.RADOS.Pool is necessary otherwise addRADOSConfigFile() will fail
 	_, err := cephclient.GetPoolDetails(context, clusterInfo, n.Spec.RADOS.Pool)
 	if err != nil {
+		if strings.Contains(err.Error(), "unrecognized pool") && clusterInfo.CephVersion.IsAtLeastPacific() {
+			err := createDefaultNFSRADOSPool(context, clusterInfo, n.Spec.RADOS.Pool)
+			if err != nil {
+				return errors.Wrapf(err, "failed to find %q pool and unable to create it", n.Spec.RADOS.Pool)
+			}
+			return nil
+		}
 		return errors.Wrapf(err, "pool %q not found", n.Spec.RADOS.Pool)
 	}
-
 	return nil
 }

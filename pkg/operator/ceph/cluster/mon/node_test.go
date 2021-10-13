@@ -23,7 +23,6 @@ import (
 	"testing"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	"github.com/rook/rook/pkg/apis/rook.io"
 	"github.com/rook/rook/pkg/clusterd"
 	clienttest "github.com/rook/rook/pkg/daemon/ceph/client/test"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
@@ -41,7 +40,7 @@ func TestNodeAffinity(t *testing.T) {
 	c := New(&clusterd.Context{Clientset: clientset}, "ns", cephv1.ClusterSpec{}, &k8sutil.OwnerInfo{}, &sync.Mutex{})
 	setCommonMonProperties(c, 0, cephv1.MonSpec{Count: 3, AllowMultiplePerNode: true}, "myversion")
 
-	c.spec.Placement = map[rook.KeyType]cephv1.Placement{}
+	c.spec.Placement = map[cephv1.KeyType]cephv1.Placement{}
 	c.spec.Placement[cephv1.KeyMon] = cephv1.Placement{NodeAffinity: &v1.NodeAffinity{
 		RequiredDuringSchedulingIgnoredDuringExecution: &v1.NodeSelector{
 			NodeSelectorTerms: []v1.NodeSelectorTerm{
@@ -214,20 +213,35 @@ func TestGetNodeInfoFromNode(t *testing.T) {
 	assert.NotNil(t, node)
 
 	node.Status = v1.NodeStatus{}
-	node.Status.Addresses = []v1.NodeAddress{
-		{
-			Type:    v1.NodeExternalIP,
-			Address: "1.1.1.1",
-		},
-	}
+	node.Status.Addresses = []v1.NodeAddress{}
 
 	var info *MonScheduleInfo
 	_, err = getNodeInfoFromNode(*node)
 	assert.NotNil(t, err)
 
-	node.Status.Addresses[0].Type = v1.NodeInternalIP
-	node.Status.Addresses[0].Address = "172.17.0.1"
+	// With internalIP and externalIP
+	node.Status.Addresses = []v1.NodeAddress{
+		{
+			Type:    v1.NodeExternalIP,
+			Address: "1.1.1.1",
+		},
+		{
+			Type:    v1.NodeInternalIP,
+			Address: "172.17.0.1",
+		},
+	}
 	info, err = getNodeInfoFromNode(*node)
 	assert.NoError(t, err)
-	assert.Equal(t, "172.17.0.1", info.Address)
+	assert.Equal(t, "172.17.0.1", info.Address) // Must return the internalIP
+
+	// With externalIP only
+	node.Status.Addresses = []v1.NodeAddress{
+		{
+			Type:    v1.NodeExternalIP,
+			Address: "1.2.3.4",
+		},
+	}
+	info, err = getNodeInfoFromNode(*node)
+	assert.NoError(t, err)
+	assert.Equal(t, "1.2.3.4", info.Address)
 }

@@ -29,7 +29,6 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/coreos/pkg/capnslog"
 	"github.com/go-ini/ini"
 	"github.com/rook/rook/pkg/clusterd"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
@@ -49,15 +48,7 @@ func TestCreateDefaultCephConfig(t *testing.T) {
 	}
 
 	// start with INFO level logging
-	context := &clusterd.Context{
-		LogLevel: capnslog.INFO,
-		NetworkInfo: clusterd.NetworkInfo{
-			PublicAddr:     "10.1.1.1",
-			PublicNetwork:  "10.1.1.0/24",
-			ClusterAddr:    "10.1.2.2",
-			ClusterNetwork: "10.1.2.0/24",
-		},
-	}
+	context := &clusterd.Context{}
 
 	cephConfig, err := CreateDefaultCephConfig(context, clusterInfo)
 	if err != nil {
@@ -65,20 +56,11 @@ func TestCreateDefaultCephConfig(t *testing.T) {
 	}
 	verifyConfig(t, cephConfig, clusterInfo, 0)
 
-	// now use DEBUG level logging
-	context.LogLevel = capnslog.DEBUG
-
 	cephConfig, err = CreateDefaultCephConfig(context, clusterInfo)
 	if err != nil {
 		t.Fatalf("failed to create default ceph config. %+v", err)
 	}
 	verifyConfig(t, cephConfig, clusterInfo, 10)
-
-	// verify the network info config
-	assert.Equal(t, "10.1.1.1", cephConfig.PublicAddr)
-	assert.Equal(t, "10.1.1.0/24", cephConfig.PublicNetwork)
-	assert.Equal(t, "10.1.2.2", cephConfig.ClusterAddr)
-	assert.Equal(t, "10.1.2.0/24", cephConfig.ClusterNetwork)
 }
 
 func TestGenerateConfigFile(t *testing.T) {
@@ -120,6 +102,7 @@ func TestGenerateConfigFile(t *testing.T) {
 		},
 		CephVersion: cephver.Nautilus,
 		CephCred:    CephCred{Username: "admin", Secret: "mysecret"},
+		Context:     ctx,
 	}
 
 	isInitialized := clusterInfo.IsInitialized(true)

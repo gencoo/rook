@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"syscall"
 	"testing"
 	"time"
 
@@ -31,9 +32,6 @@ import (
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
-	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes/fake"
 )
 
 const (
@@ -57,7 +55,14 @@ const (
     "system": "true",
     "temp_url_keys": [],
     "type": "rgw",
-    "mfa_ids": []
+    "mfa_ids": [],
+	"user_quota": {
+		"enabled": false,
+		"check_on_raw": false,
+		"max_size": -1,
+		"max_size_kb": 0,
+		"max_objects": -1
+	}
 }`
 	access_key = "VFKF8SSU9L3L2UR03Z8C"
 )
@@ -179,7 +184,7 @@ func deleteStore(t *testing.T, name string, existingStores string, expectedDelet
 	executor.MockExecuteCommandWithTimeout = executorFuncWithTimeout
 	executor.MockExecuteCommandWithOutput = executorFunc
 	executor.MockExecuteCommandWithCombinedOutput = executorFunc
-	context := &Context{Context: &clusterd.Context{Executor: executor}, Name: "myobj", clusterInfo: &client.ClusterInfo{Namespace: "ns"}}
+	context := &Context{Context: &clusterd.Context{Executor: executor}, Name: "myobj", clusterInfo: client.AdminClusterInfo("mycluster")}
 
 	// Delete an object store without deleting the pools
 	spec := cephv1.ObjectStoreSpec{}
@@ -210,35 +215,20 @@ func deleteStore(t *testing.T, name string, existingStores string, expectedDelet
 }
 
 func TestGetObjectBucketProvisioner(t *testing.T) {
-	ctx := context.TODO()
-	k8s := fake.NewSimpleClientset()
-	operatorSettingConfigMapName := "rook-ceph-operator-config"
 	testNamespace := "test-namespace"
-	watchOperatorNamespace := map[string]string{"ROOK_OBC_WATCH_OPERATOR_NAMESPACE": "true"}
-	ignoreOperatorNamespace := map[string]string{"ROOK_OBC_WATCH_OPERATOR_NAMESPACE": "false"}
-	context := &clusterd.Context{Clientset: k8s}
 	os.Setenv(k8sutil.PodNamespaceEnvVar, testNamespace)
 
-	cm := &v1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      operatorSettingConfigMapName,
-			Namespace: testNamespace,
-		},
-		Data: watchOperatorNamespace,
-	}
+	t.Run("watch single namespace", func(t *testing.T) {
+		data := map[string]string{"ROOK_OBC_WATCH_OPERATOR_NAMESPACE": "true"}
+		bktprovisioner := GetObjectBucketProvisioner(data, testNamespace)
+		assert.Equal(t, fmt.Sprintf("%s.%s", testNamespace, bucketProvisionerName), bktprovisioner)
+	})
 
-	_, err := k8s.CoreV1().ConfigMaps(testNamespace).Create(ctx, cm, metav1.CreateOptions{})
-	assert.NoError(t, err)
-
-	bktprovisioner := GetObjectBucketProvisioner(context, testNamespace)
-	assert.Equal(t, fmt.Sprintf("%s.%s", testNamespace, bucketProvisionerName), bktprovisioner)
-
-	cm.Data = ignoreOperatorNamespace
-	_, err = k8s.CoreV1().ConfigMaps(testNamespace).Update(ctx, cm, metav1.UpdateOptions{})
-	assert.NoError(t, err)
-
-	bktprovisioner = GetObjectBucketProvisioner(context, testNamespace)
-	assert.Equal(t, bucketProvisionerName, bktprovisioner)
+	t.Run("watch all namespaces", func(t *testing.T) {
+		data := map[string]string{"ROOK_OBC_WATCH_OPERATOR_NAMESPACE": "false"}
+		bktprovisioner := GetObjectBucketProvisioner(data, testNamespace)
+		assert.Equal(t, bucketProvisionerName, bktprovisioner)
+	})
 }
 
 func TestDashboard(t *testing.T) {
@@ -254,10 +244,13 @@ func TestDashboard(t *testing.T) {
 			return "", nil
 		},
 	}
-	context := &clusterd.Context{Executor: executor}
-	objContext := NewContext(context, &client.ClusterInfo{Namespace: "mycluster",
-		CephVersion: cephver.CephVersion{Major: 15, Minor: 2, Extra: 9}},
+	objContext := NewContext(&clusterd.Context{Executor: executor}, &client.ClusterInfo{
+		Namespace:   "mycluster",
+		CephVersion: cephver.CephVersion{Major: 15, Minor: 2, Extra: 9},
+		Context:     context.TODO(),
+	},
 		storeName)
+
 	checkdashboard, err := checkDashboardUser(objContext)
 	assert.NoError(t, err)
 	assert.False(t, checkdashboard)
@@ -277,9 +270,11 @@ func TestDashboard(t *testing.T) {
 	assert.True(t, checkdashboard)
 	disableRGWDashboard(objContext)
 
-	context = &clusterd.Context{Executor: executor}
-	objContext = NewContext(context, &client.ClusterInfo{Namespace: "mycluster",
-		CephVersion: cephver.CephVersion{Major: 15, Minor: 2, Extra: 10}},
+	objContext = NewContext(&clusterd.Context{Executor: executor}, &client.ClusterInfo{
+		Namespace:   "mycluster",
+		CephVersion: cephver.CephVersion{Major: 15, Minor: 2, Extra: 10},
+		Context:     context.TODO(),
+	},
 		storeName)
 	err = enableRGWDashboard(objContext)
 	assert.Nil(t, err)
@@ -296,4 +291,262 @@ func TestDashboard(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, checkdashboard)
 	disableRGWDashboard(objContext)
+}
+
+// import TestMockExecHelperProcess
+func TestMockExecHelperProcess(t *testing.T) {
+	exectest.TestMockExecHelperProcess(t)
+}
+
+func Test_createMultisite(t *testing.T) {
+	// control the return values from calling get/create/update on resources
+	type commandReturns struct {
+		realmExists             bool
+		zoneGroupExists         bool
+		zoneExists              bool
+		failCreateRealm         bool
+		failCreateZoneGroup     bool
+		failCreateZone          bool
+		failCommitConfigChanges bool
+	}
+
+	// control whether we should expect certain 'get' calls
+	type expectCommands struct {
+		getRealm            bool
+		createRealm         bool
+		getZoneGroup        bool
+		createZoneGroup     bool
+		getZone             bool
+		createZone          bool
+		commitConfigChanges bool
+	}
+
+	// vars used for testing if calls were made
+	var (
+		calledGetRealm            = false
+		calledGetZoneGroup        = false
+		calledGetZone             = false
+		calledCreateRealm         = false
+		calledCreateZoneGroup     = false
+		calledCreateZone          = false
+		calledCommitConfigChanges = false
+	)
+
+	commitConfigChangesOrig := commitConfigChanges
+	defer func() { commitConfigChanges = commitConfigChangesOrig }()
+
+	enoentIfNotExist := func(resourceExists bool) (string, error) {
+		if !resourceExists {
+			return "", exectest.MockExecCommandReturns(t, "", "", int(syscall.ENOENT))
+		}
+		return "{}", nil // get wants json, and {} is the most basic json
+	}
+
+	errorIfFail := func(shouldFail bool) (string, error) {
+		if shouldFail {
+			return "", exectest.MockExecCommandReturns(t, "", "basic error", 1)
+		}
+		return "", nil
+	}
+
+	setupTest := func(env commandReturns) *exectest.MockExecutor {
+		// reset output testing vars
+		calledGetRealm = false
+		calledCreateRealm = false
+		calledGetZoneGroup = false
+		calledCreateZoneGroup = false
+		calledGetZone = false
+		calledCreateZone = false
+		calledCommitConfigChanges = false
+
+		commitConfigChanges = func(c *Context) error {
+			calledCommitConfigChanges = true
+			if env.failCommitConfigChanges {
+				return errors.New("fake error from CommitConfigChanges")
+			}
+			return nil
+		}
+
+		return &exectest.MockExecutor{
+			MockExecuteCommandWithTimeout: func(timeout time.Duration, command string, arg ...string) (string, error) {
+				if command == "radosgw-admin" {
+					switch arg[0] {
+					case "realm":
+						switch arg[1] {
+						case "get":
+							calledGetRealm = true
+							return enoentIfNotExist(env.realmExists)
+						case "create":
+							calledCreateRealm = true
+							return errorIfFail(env.failCreateRealm)
+						}
+					case "zonegroup":
+						switch arg[1] {
+						case "get":
+							calledGetZoneGroup = true
+							return enoentIfNotExist(env.zoneGroupExists)
+						case "create":
+							calledCreateZoneGroup = true
+							return errorIfFail(env.failCreateZoneGroup)
+						}
+					case "zone":
+						switch arg[1] {
+						case "get":
+							calledGetZone = true
+							return enoentIfNotExist(env.zoneExists)
+						case "create":
+							calledCreateZone = true
+							return errorIfFail(env.failCreateZone)
+						}
+					}
+				}
+				t.Fatalf("unhandled command: %s %v", command, arg)
+				panic("unhandled command")
+			},
+		}
+	}
+
+	expectNoErr := false // want no error
+	expectErr := true    // want an error
+
+	tests := []struct {
+		name           string
+		commandReturns commandReturns
+		expectCommands expectCommands
+		wantErr        bool
+	}{
+		{"create realm, zonegroup, and zone; commit config",
+			commandReturns{
+				// nothing exists, and all should succeed
+			},
+			expectCommands{
+				getRealm:            true,
+				createRealm:         true,
+				getZoneGroup:        true,
+				createZoneGroup:     true,
+				getZone:             true,
+				createZone:          true,
+				commitConfigChanges: true,
+			},
+			expectNoErr},
+		{"fail creating realm",
+			commandReturns{
+				failCreateRealm: true,
+			},
+			expectCommands{
+				getRealm:    true,
+				createRealm: true,
+				// when we fail to create realm, we should not continue
+			},
+			expectErr},
+		{"fail creating zonegroup",
+			commandReturns{
+				failCreateZoneGroup: true,
+			},
+			expectCommands{
+				getRealm:        true,
+				createRealm:     true,
+				getZoneGroup:    true,
+				createZoneGroup: true,
+				// when we fail to create zonegroup, we should not continue
+			},
+			expectErr},
+		{"fail creating zone",
+			commandReturns{
+				failCreateZone: true,
+			},
+			expectCommands{
+				getRealm:        true,
+				createRealm:     true,
+				getZoneGroup:    true,
+				createZoneGroup: true,
+				getZone:         true,
+				createZone:      true,
+				// when we fail to create zone, we should not continue
+			},
+			expectErr},
+		{"fail commit config",
+			commandReturns{
+				failCommitConfigChanges: true,
+			},
+			expectCommands{
+				getRealm:            true,
+				createRealm:         true,
+				getZoneGroup:        true,
+				createZoneGroup:     true,
+				getZone:             true,
+				createZone:          true,
+				commitConfigChanges: true,
+			},
+			expectErr},
+		{"realm exists; create zonegroup and zone; commit config",
+			commandReturns{
+				realmExists: true,
+			},
+			expectCommands{
+				getRealm:            true,
+				createRealm:         false,
+				getZoneGroup:        true,
+				createZoneGroup:     true,
+				getZone:             true,
+				createZone:          true,
+				commitConfigChanges: true,
+			},
+			expectNoErr},
+		{"realm and zonegroup exist; create zone; commit config",
+			commandReturns{
+				realmExists:     true,
+				zoneGroupExists: true,
+			},
+			expectCommands{
+				getRealm:            true,
+				createRealm:         false,
+				getZoneGroup:        true,
+				createZoneGroup:     false,
+				getZone:             true,
+				createZone:          true,
+				commitConfigChanges: true,
+			},
+			expectNoErr},
+		{"realm, zonegroup, and zone exist; commit config",
+			commandReturns{
+				realmExists:     true,
+				zoneGroupExists: true,
+				zoneExists:      true,
+			},
+			expectCommands{
+				getRealm:            true,
+				createRealm:         false,
+				getZoneGroup:        true,
+				createZoneGroup:     false,
+				getZone:             true,
+				createZone:          false,
+				commitConfigChanges: true,
+			},
+			expectNoErr},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			executor := setupTest(tt.commandReturns)
+			ctx := &clusterd.Context{
+				Executor: executor,
+			}
+			objContext := NewContext(ctx, &client.ClusterInfo{Namespace: "my-cluster"}, "my-store")
+
+			// assumption: endpointArg is sufficiently tested by integration tests
+			err := createMultisite(objContext, "")
+			assert.Equal(t, tt.expectCommands.getRealm, calledGetRealm)
+			assert.Equal(t, tt.expectCommands.createRealm, calledCreateRealm)
+			assert.Equal(t, tt.expectCommands.getZoneGroup, calledGetZoneGroup)
+			assert.Equal(t, tt.expectCommands.createZoneGroup, calledCreateZoneGroup)
+			assert.Equal(t, tt.expectCommands.getZone, calledGetZone)
+			assert.Equal(t, tt.expectCommands.createZone, calledCreateZone)
+			assert.Equal(t, tt.expectCommands.commitConfigChanges, calledCommitConfigChanges)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
 }

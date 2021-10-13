@@ -32,7 +32,7 @@ metadata:
 spec:
   cephVersion:
     # see the "Cluster Settings" section below for more details on which image of ceph to run
-    image: quay.io/ceph/ceph:v16.2.5
+    image: quay.io/ceph/ceph:v16.2.6
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -40,6 +40,7 @@ spec:
   storage:
     useAllNodes: true
     useAllDevices: true
+    onlyApplyOSDPlacement: false
 ```
 
 ## PVC-based Cluster
@@ -59,7 +60,7 @@ metadata:
 spec:
   cephVersion:
     # see the "Cluster Settings" section below for more details on which image of ceph to run
-    image: quay.io/ceph/ceph:v16.2.5
+    image: quay.io/ceph/ceph:v16.2.6
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -88,6 +89,7 @@ spec:
           volumeMode: Block
           accessModes:
             - ReadWriteOnce
+    onlyApplyOSDPlacement: false
 ```
 
 For a more advanced scenario, such as adding a dedicated device you can refer to the [dedicated metadata device for OSD on PVC section](#dedicated-metadata-and-wal-device-for-osd-on-pvc).
@@ -127,7 +129,7 @@ spec:
       - name: c
   cephVersion:
     # Stretch cluster is supported in Ceph Pacific or newer.
-    image: quay.io/ceph/ceph:v16.2.5
+    image: quay.io/ceph/ceph:v16.2.6
     allowUnsupported: true
   # Either storageClassDeviceSets or the storage section can be specified for creating OSDs.
   # This example uses all devices for simplicity.
@@ -165,7 +167,7 @@ Settings can be specified at the global level to apply to the cluster as a whole
 * `external`:
   * `enable`: if `true`, the cluster will not be managed by Rook but via an external entity. This mode is intended to connect to an existing cluster. In this case, Rook will only consume the external cluster. However, Rook will be able to deploy various daemons in Kubernetes such as object gateways, mds and nfs if an image is provided and will refuse otherwise. If this setting is enabled **all** the other options will be ignored except `cephVersion.image` and `dataDirHostPath`. See [external cluster configuration](#external-cluster). If `cephVersion.image` is left blank, Rook will refuse the creation of extra CRs like object, file and nfs.
 * `cephVersion`: The version information for launching the ceph daemons.
-  * `image`: The image used for running the ceph daemons. For example, `quay.io/ceph/ceph:v15.2.12` or `v16.2.5`. For more details read the [container images section](#ceph-container-images).
+  * `image`: The image used for running the ceph daemons. For example, `quay.io/ceph/ceph:v15.2.12` or `v16.2.6`. For more details read the [container images section](#ceph-container-images).
   For the latest ceph images, see the [Ceph DockerHub](https://hub.docker.com/r/ceph/ceph/tags/).
   To ensure a consistent version of the image is running across all nodes in the cluster, it is recommended to use a very specific image version.
   Tags also exist that would give the latest version, but they are only recommended for test environments. For example, the tag `v14` will be updated each time a new nautilus build is released.
@@ -216,7 +218,9 @@ For more details on the mons and when to choose a number other than `3`, see the
   * `config`: Config settings applied to all OSDs on the node unless overridden by `devices`. See the [config settings](#osd-configuration-settings) below.
   * [storage selection settings](#storage-selection-settings)
   * [Storage Class Device Sets](#storage-class-device-sets)
-* `disruptionManagement`: The section for configuring management of daemon disruptions
+  * `onlyApplyOSDPlacement`: Whether the placement specific for OSDs is merged with the `all` placement. If `false`, the OSD placement will be merged with the `all` placement. If true, the `OSD placement will be applied` and the `all` placement will be ignored. The placement for OSDs is computed from several different places depending on the type of OSD:
+    - For non-PVCs: `placement.all` and `placement.osd`
+    - For PVCs: `placement.all` and inside the storageClassDeviceSets from the `placement` or `preparePlacement`
   * `managePodBudgets`: if `true`, the operator will create and manage PodDisruptionBudgets for OSD, Mon, RGW, and MDS daemons. OSD PDBs are managed dynamically via the strategy outlined in the [design](https://github.com/rook/rook/blob/master/design/ceph/ceph-managed-disruptionbudgets.md). The operator will block eviction of OSDs by default and unblock them safely when drains are detected.
   * `osdMaintenanceTimeout`: is a duration in minutes that determines how long an entire failureDomain like `region/zone/host` will be held in `noout` (in addition to the default DOWN/OUT interval) when it is draining. This is only relevant when  `managePodBudgets` is `true`. The default value is `30` minutes.
   * `manageMachineDisruptionBudgets`: if `true`, the operator will create and manage MachineDisruptionBudgets to ensure OSDs are only fenced when the cluster is healthy. Only available on OpenShift.
@@ -243,7 +247,12 @@ A specific will contain a specific release of Ceph as well as security fixes fro
 
 ### Mon Settings
 
-* `count`: Set the number of mons to be started. The number must be odd and between `1` and `9`. If not specified the default is set to `3`.
+* `count`: Set the number of mons to be started. The number must be between `1` and `9`. The recommended value is most commonly `3`.
+  For highest availability, an odd number of mons should be specified.
+  For higher durability in case of mon loss, an even number can be specified although availability may be lower.
+  To maintain quorum a majority of mons must be up. For example, if there are three mons, two must be up.
+  If there are four mons, three must be up. If there are two mons, both must be up.
+  If quorum is lost, see the [disaster recovery guide](ceph-disaster-recovery.md#restoring-mon-quorum) to restore quorum from a single mon.
 * `allowMultiplePerNode`: Whether to allow the placement of multiple mons on a single node. Default is `false` for production. Should only be set to `true` in test environments.
 * `volumeClaimTemplate`: A `PersistentVolumeSpec` used by Rook to create PVCs
   for monitor storage. This field is optional, and when not provided, HostPath
@@ -340,6 +349,9 @@ Based on the configuration, the operator will do the following:
 
 \* Internal cluster traffic includes OSD heartbeats, data replication, and data recovery
 
+Only OSD pods will have both Public and Cluster networks attached. The rest of the Ceph component pods and CSI pods will only have the Public network attached.
+Rook Ceph Operator will not have any networks attached as it proxies the required commands via a sidecar container in the mgr pod.
+
 In order to work, each selector value must match a `NetworkAttachmentDefinition` object name in Multus.
 
 For `multus` network provider, an already working cluster with Multus networking is required. Network attachment definition that later will be attached to the cluster needs to be created before the Cluster CRD.
@@ -378,6 +390,10 @@ spec:
   ```
   * This format is required in order to use the NetworkAttachmentDefinition across namespaces.
   * In Openshift, to use a NetworkAttachmentDefinition (NAD) across namespaces, the NAD must be deployed in the `default` namespace. The NAD is then referenced with the namespace: `default/rook-public-nw`
+
+#### Known issues with multus
+When a CephFS/RBD volume is mounted in a Pod using cephcsi and then the CSI CephFS/RBD plugin is restarted or terminated (e.g. by restarting or deleting its DaemonSet), all operations on the volume become blocked, even after restarting the CSI pods. The only workaround is to restart the node where the cephcsi plugin pod was restarted.
+This issue is tracked [here](https://github.com/rook/rook/issues/8085).
 
 #### IPFamily
 
@@ -435,7 +451,7 @@ Below are the settings for host-based cluster. This type of cluster can specify 
   * `config`: Device-specific config settings. See the [config settings](#osd-configuration-settings) below
 
 Host-based cluster only supports raw device and partition. Be sure to see the
-[Ceph quickstart doc prerequisites](ceph-quickstart.md#prerequisites) for additional considerations.
+[Ceph quickstart doc prerequisites](quickstart.md#prerequisites) for additional considerations.
 
 Below are the settings for a PVC-based cluster.
 
@@ -669,8 +685,8 @@ kubectl -n rook-ceph get CephCluster -o yaml
       deviceClasses:
       - name: hdd
     version:
-      image: quay.io/ceph/ceph:v16.2.5
-      version: 16.2.5-0
+      image: quay.io/ceph/ceph:v16.2.6
+      version: 16.2.6-0
     conditions:
     - lastHeartbeatTime: "2021-03-02T21:22:11Z"
       lastTransitionTime: "2021-03-02T21:21:09Z"
@@ -731,7 +747,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: quay.io/ceph/ceph:v16.2.5
+    image: quay.io/ceph/ceph:v16.2.6
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -763,7 +779,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: quay.io/ceph/ceph:v16.2.5
+    image: quay.io/ceph/ceph:v16.2.6
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -803,7 +819,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: quay.io/ceph/ceph:v16.2.5
+    image: quay.io/ceph/ceph:v16.2.6
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -850,7 +866,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: quay.io/ceph/ceph:v16.2.5
+    image: quay.io/ceph/ceph:v16.2.6
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -956,7 +972,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: quay.io/ceph/ceph:v16.2.5
+    image: quay.io/ceph/ceph:v16.2.6
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -1002,7 +1018,7 @@ spec:
           requests:
             storage: 10Gi
   cephVersion:
-    image: quay.io/ceph/ceph:v16.2.5
+    image: quay.io/ceph/ceph:v16.2.6
     allowUnsupported: false
   dashboard:
     enabled: true
@@ -1031,7 +1047,7 @@ spec:
                   operator: In
                   values:
                     - cluster1
-                topologyKey: "topology.kubernetes.io/zone"
+              topologyKey: "topology.kubernetes.io/zone"
       volumeClaimTemplates:
       - metadata:
           name: data
@@ -1460,7 +1476,7 @@ spec:
     enable: true
   dataDirHostPath: /var/lib/rook
   cephVersion:
-    image: quay.io/ceph/ceph:v16.2.5 # Should match external cluster version
+    image: quay.io/ceph/ceph:v16.2.6 # Should match external cluster version
 ```
 
 ### Security

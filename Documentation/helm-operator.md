@@ -25,7 +25,7 @@ See the [Helm support matrix](https://helm.sh/docs/topics/version_skew/) for mor
 
 The Ceph Operator helm chart will install the basic components necessary to create a storage platform for your Kubernetes cluster.
 1. Install the Helm chart
-1. [Create a Rook cluster](ceph-quickstart.md#create-a-rook-cluster).
+1. [Create a Rook cluster](quickstart.md#create-a-rook-cluster).
 
 The `helm install` command deploys rook on the Kubernetes cluster in the default configuration. The [configuration](#configuration) section lists the parameters that can be configured during installation. It is recommended that the rook operator be installed into the `rook-ceph` namespace (you will install your clusters into separate namespaces).
 
@@ -106,8 +106,9 @@ The following tables lists the configurable parameters of the rook-operator char
 | `csi.provisionerPriorityClassName`  | PriorityClassName to be set on csi driver provisioner pods.                                                                 | <none>                                                    |
 | `csi.enableOMAPGenerator`           | EnableOMAP generator deploys omap sidecar in CSI provisioner pod, to enable it set it to true                               | `false`                                                   |
 | `csi.rbdFSGroupPolicy`              | Policy for modifying a volume's ownership or permissions when the RBD PVC is being mounted                                  | ReadWriteOnceWithFSType                                   |
-| `csi.cephFSFSGroupPolicy`           | Policy for modifying a volume's ownership or permissions when the CephFS PVC is being mounted                               | ReadWriteOnceWithFSType                                   |
+| `csi.cephFSFSGroupPolicy`           | Policy for modifying a volume's ownership or permissions when the CephFS PVC is being mounted                               | `None`                                                    |
 | `csi.logLevel`                      | Set logging level for csi containers. Supported values from 0 to 5. 0 for general useful logs, 5 for trace level verbosity. | `0`                                                       |
+| `csi.provisionerReplicas`           | Set replicas for csi provisioner deployment.                                                                                | `2`                                                       |
 | `csi.enableGrpcMetrics`             | Enable Ceph CSI GRPC Metrics.                                                                                               | `false`                                                   |
 | `csi.enableCSIHostNetwork`          | Enable Host Networking for Ceph CSI nodeplugins.                                                                            | `false`                                                   |
 | `csi.provisionerTolerations`        | Array of tolerations in YAML format which will be added to CSI provisioner deployment.                                      | <none>                                                    |
@@ -132,34 +133,21 @@ The following tables lists the configurable parameters of the rook-operator char
 | `csi.rbdLivenessMetricsPort`        | Ceph CSI RBD driver metrics port.                                                                                           | `8080`                                                    |
 | `csi.forceCephFSKernelClient`       | Enable Ceph Kernel clients on kernel < 4.17 which support quotas for Cephfs.                                                | `true`                                                    |
 | `csi.kubeletDirPath`                | Kubelet root directory path (if the Kubelet uses a different path for the `--root-dir` flag)                                | `/var/lib/kubelet`                                        |
-| `csi.cephcsi.image`                 | Ceph CSI image.                                                                                                             | `quay.io/cephcsi/cephcsi:v3.3.1`                          |
+| `csi.cephcsi.image`                 | Ceph CSI image.                                                                                                             | `quay.io/cephcsi/cephcsi:v3.4.0`                          |
 | `csi.rbdPluginUpdateStrategy`       | CSI Rbd plugin daemonset update strategy, supported values are OnDelete and RollingUpdate.                                  | `OnDelete`                                                |
 | `csi.cephFSPluginUpdateStrategy`    | CSI CephFS plugin daemonset update strategy, supported values are OnDelete and RollingUpdate.                               | `OnDelete`                                                |
-| `csi.registrar.image`               | Kubernetes CSI registrar image.                                                                                             | `k8s.gcr.io/sig-storage/csi-node-driver-registrar:v2.2.0` |
-| `csi.resizer.image`                 | Kubernetes CSI resizer image.                                                                                               | `k8s.gcr.io/sig-storage/csi-resizer:v1.2.0`               |
-| `csi.provisioner.image`             | Kubernetes CSI provisioner image.                                                                                           | `k8s.gcr.io/sig-storage/csi-provisioner:v2.2.2`           |
-| `csi.snapshotter.image`             | Kubernetes CSI snapshotter image.                                                                                           | `k8s.gcr.io/sig-storage/csi-snapshotter:v4.1.1`           |
-| `csi.attacher.image`                | Kubernetes CSI Attacher image.                                                                                              | `k8s.gcr.io/sig-storage/csi-attacher:v3.2.1`              |
+| `csi.registrar.image`               | Kubernetes CSI registrar image.                                                                                             | `k8s.gcr.io/sig-storage/csi-node-driver-registrar:v2.3.0` |
+| `csi.resizer.image`                 | Kubernetes CSI resizer image.                                                                                               | `k8s.gcr.io/sig-storage/csi-resizer:v1.3.0`               |
+| `csi.provisioner.image`             | Kubernetes CSI provisioner image.                                                                                           | `k8s.gcr.io/sig-storage/csi-provisioner:v3.0.0`           |
+| `csi.snapshotter.image`             | Kubernetes CSI snapshotter image.                                                                                           | `k8s.gcr.io/sig-storage/csi-snapshotter:v4.2.0`           |
+| `csi.attacher.image`                | Kubernetes CSI Attacher image.                                                                                              | `k8s.gcr.io/sig-storage/csi-attacher:v3.3.0`              |
 | `csi.cephfsPodLabels`               | Labels to add to the CSI CephFS Pods.                                                                                       | <none>                                                    |
 | `csi.rbdPodLabels`                  | Labels to add to the CSI RBD Pods.                                                                                          | <none>                                                    |
 | `csi.volumeReplication.enabled`     | Enable Volume Replication.                                                                                                  | `false`                                                   |
 | `csi.volumeReplication.image`       | Volume Replication Controller image.                                                                                        | `quay.io/csiaddons/volumereplication-operator:v0.1.0`     |
-| `agent.flexVolumeDirPath`           | Path where the Rook agent discovers the flex volume plugins (*)                                                             | `/usr/libexec/kubernetes/kubelet-plugins/volume/exec/`    |
-| `agent.libModulesDirPath`           | Path where the Rook agent should look for kernel modules (*)                                                                | `/lib/modules`                                            |
-| `agent.mounts`                      | Additional paths to be mounted in the agent container (**)                                                                  | <none>                                                    |
-| `agent.mountSecurityMode`           | Mount Security Mode for the agent.                                                                                          | `Any`                                                     |
-| `agent.priorityClassName`           | The priority class name to add to the agent pods                                                                            | <none>                                                    |
-| `agent.toleration`                  | Toleration for the agent pods                                                                                               | <none>                                                    |
-| `agent.tolerationKey`               | The specific key of the taint to tolerate                                                                                   | <none>                                                    |
-| `agent.tolerations`                 | Array of tolerations in YAML format which will be added to agent deployment                                                 | <none>                                                    |
-| `agent.nodeAffinity`                | The node labels for affinity of `rook-agent` (***)                                                                          | <none>                                                    |
 | `admissionController.tolerations`   | Array of tolerations in YAML format which will be added to admission controller deployment.                                 | <none>                                                    |
 | `admissionController.nodeAffinity`  | The node labels for affinity of the admission controller deployment (***)                                                   | <none>                                                    |
 | `allowMultipleFilesystems`          | **(experimental)** Allows multiple filesystems to be deployed to a Ceph cluster. Octopus (v15) or Nautilus (v14)            | `false`                                                   |
-
-&ast; For information on what to set `agent.flexVolumeDirPath` to, please refer to the [Rook flexvolume documentation](flexvolume.md)
-
-&ast; &ast; `agent.mounts` should have this format `mountname1=/host/path:/container/path,mountname2=/host/path2:/container/path2`
 
 &ast; &ast; &ast; `nodeAffinity` and `*NodeAffinity` options should have the format `"role=storage,rook; storage=ceph"` or `storage=;role=rook-example` or `storage=;` (_checks only for presence of key_)
 

@@ -17,6 +17,7 @@ limitations under the License.
 package client
 
 import (
+	"context"
 	"strconv"
 	"testing"
 	"time"
@@ -115,6 +116,7 @@ func TestNewRBDCommand(t *testing.T) {
 		executor.MockExecuteCommandWithOutput = func(command string, args ...string) (string, error) {
 			switch {
 			case command == "rbd" && args[0] == "create":
+				assert.Len(t, args, 8)
 				return "success", nil
 			}
 			return "", errors.Errorf("unexpected ceph command %q", args)
@@ -136,8 +138,23 @@ func TestNewRBDCommand(t *testing.T) {
 		assert.True(t, cmd.RemoteExecution)
 		_, err := cmd.Run()
 		assert.Error(t, err)
+		assert.Len(t, cmd.args, 4)
 		// This is not the best but it shows we go through the right codepath
 		assert.EqualError(t, err, "no pods found with selector \"rook-ceph-mgr\"")
+	})
+
+	t.Run("context canceled nothing to run", func(t *testing.T) {
+		clusterInfo := AdminClusterInfo("rook")
+		ctx, cancel := context.WithCancel(context.TODO())
+		clusterInfo.Context = ctx
+		cancel()
+		executor := &exectest.MockExecutor{}
+		context := &clusterd.Context{Executor: executor, RemoteExecutor: exec.RemotePodCommandExecutor{ClientSet: test.New(t, 3)}}
+		cmd := NewRBDCommand(context, clusterInfo, args)
+		_, err := cmd.Run()
+		assert.Error(t, err)
+		// This is not the best but it shows we go through the right codepath
+		assert.EqualError(t, err, "context canceled")
 	})
 
 }

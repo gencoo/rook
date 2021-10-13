@@ -22,12 +22,14 @@ import (
 	"io/ioutil"
 	"os"
 	"testing"
+	"time"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	"github.com/rook/rook/pkg/apis/rook.io"
+	"github.com/rook/rook/pkg/client/clientset/versioned/scheme"
 	"github.com/rook/rook/pkg/clusterd"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	testopk8s "github.com/rook/rook/pkg/operator/k8sutil/test"
@@ -35,8 +37,9 @@ import (
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/tevino/abool"
 	apps "k8s.io/api/apps/v1"
+	policyv1 "k8s.io/api/policy/v1"
+	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -61,28 +64,36 @@ func TestStartMgr(t *testing.T) {
 
 	clientset := testop.New(t, 3)
 	configDir, _ := ioutil.TempDir("", "")
+	scheme := scheme.Scheme
+	err := policyv1.AddToScheme(scheme)
+	assert.NoError(t, err)
+	err = policyv1beta1.AddToScheme(scheme)
+	assert.NoError(t, err)
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects().Build()
+
 	defer os.RemoveAll(configDir)
 	ctx := &clusterd.Context{
-		Executor:                   executor,
-		ConfigDir:                  configDir,
-		Clientset:                  clientset,
-		RequestCancelOrchestration: abool.New()}
+		Executor:  executor,
+		ConfigDir: configDir,
+		Clientset: clientset,
+		Client:    cl,
+	}
 	ownerInfo := cephclient.NewMinimumOwnerInfo(t)
-	clusterInfo := &cephclient.ClusterInfo{Namespace: "ns", FSID: "myfsid", OwnerInfo: ownerInfo, CephVersion: cephver.CephVersion{Major: 16, Minor: 2, Build: 5}}
+	clusterInfo := &cephclient.ClusterInfo{Namespace: "ns", FSID: "myfsid", OwnerInfo: ownerInfo, CephVersion: cephver.CephVersion{Major: 16, Minor: 2, Build: 5}, Context: context.TODO()}
 	clusterInfo.SetName("test")
 	clusterSpec := cephv1.ClusterSpec{
-		Annotations:        map[rook.KeyType]rook.Annotations{cephv1.KeyMgr: {"my": "annotation"}},
-		Labels:             map[rook.KeyType]rook.Labels{cephv1.KeyMgr: {"my-label-key": "value"}},
+		Annotations:        map[cephv1.KeyType]cephv1.Annotations{cephv1.KeyMgr: {"my": "annotation"}},
+		Labels:             map[cephv1.KeyType]cephv1.Labels{cephv1.KeyMgr: {"my-label-key": "value"}},
 		Dashboard:          cephv1.DashboardSpec{Enabled: true, SSL: true},
 		Mgr:                cephv1.MgrSpec{Count: 1},
-		PriorityClassNames: map[rook.KeyType]string{cephv1.KeyMgr: "my-priority-class"},
+		PriorityClassNames: map[cephv1.KeyType]string{cephv1.KeyMgr: "my-priority-class"},
 		DataDirHostPath:    "/var/lib/rook/",
 	}
 	c := New(ctx, clusterInfo, clusterSpec, "myversion")
 	defer os.RemoveAll(c.spec.DataDirHostPath)
 
 	// start a basic service
-	err := c.Start()
+	err = c.Start()
 	assert.Nil(t, err)
 	validateStart(t, c)
 	assert.ElementsMatch(t, []string{}, testopk8s.DeploymentNamesUpdated(deploymentsUpdated))
@@ -195,8 +206,7 @@ func TestMgrSidecarReconcile(t *testing.T) {
 		ConfigDir: configDir,
 		Clientset: clientset,
 	}
-	ownerInfo := cephclient.NewMinimumOwnerInfo(t)
-	clusterInfo := &cephclient.ClusterInfo{Namespace: "ns", OwnerInfo: ownerInfo}
+	clusterInfo := cephclient.AdminClusterInfo("mycluster")
 	clusterInfo.SetName("test")
 	c := &Cluster{spec: spec, context: ctx, clusterInfo: clusterInfo}
 
@@ -258,17 +268,20 @@ func TestConfigureModules(t *testing.T) {
 					}
 					lastModuleConfigured = args[3]
 				}
-				if args[0] == "config" && args[1] == "set" && args[2] == "global" {
-					configSettings[args[3]] = args[4]
-				}
 			}
 			return "", nil //return "{\"key\":\"mysecurekey\"}", nil
+		},
+		MockExecuteCommandWithTimeout: func(timeout time.Duration, command string, args ...string) (string, error) {
+			if args[0] == "config" && args[1] == "set" && args[2] == "global" {
+				configSettings[args[3]] = args[4]
+			}
+			return "", nil
 		},
 	}
 
 	clientset := testop.New(t, 3)
 	context := &clusterd.Context{Executor: executor, Clientset: clientset}
-	clusterInfo := &cephclient.ClusterInfo{Namespace: "ns"}
+	clusterInfo := cephclient.AdminClusterInfo("mycluster")
 	c := &Cluster{
 		context:     context,
 		clusterInfo: clusterInfo,

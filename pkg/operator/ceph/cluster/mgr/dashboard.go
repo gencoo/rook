@@ -21,7 +21,6 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"strconv"
 	"syscall"
@@ -29,8 +28,10 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
+	"github.com/rook/rook/pkg/operator/ceph/config"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	"github.com/rook/rook/pkg/operator/k8sutil"
+	"github.com/rook/rook/pkg/util"
 	"github.com/rook/rook/pkg/util/exec"
 	v1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
@@ -55,7 +56,6 @@ var (
 )
 
 func (c *Cluster) configureDashboardService(activeDaemon string) error {
-	ctx := context.TODO()
 	dashboardService, err := c.makeDashboardService(AppName, activeDaemon)
 	if err != nil {
 		return err
@@ -67,7 +67,7 @@ func (c *Cluster) configureDashboardService(activeDaemon string) error {
 		}
 	} else {
 		// delete the dashboard service if it exists
-		err := c.context.Clientset.CoreV1().Services(c.clusterInfo.Namespace).Delete(ctx, dashboardService.Name, metav1.DeleteOptions{})
+		err := c.context.Clientset.CoreV1().Services(c.clusterInfo.Namespace).Delete(c.clusterInfo.Context, dashboardService.Name, metav1.DeleteOptions{})
 		if err != nil && !kerrors.IsNotFound(err) {
 			return errors.Wrap(err, "failed to delete dashboard service")
 		}
@@ -111,17 +111,19 @@ func (c *Cluster) configureDashboardModules() error {
 }
 
 func (c *Cluster) configureDashboardModuleSettings(daemonID string) (bool, error) {
+	monStore := config.GetMonStore(c.context, c.clusterInfo)
+
 	daemonID = fmt.Sprintf("mgr.%s", daemonID)
 
 	// url prefix
-	hasChanged, err := client.SetConfig(c.context, c.clusterInfo, daemonID, "mgr/dashboard/url_prefix", c.spec.Dashboard.URLPrefix, false)
+	hasChanged, err := monStore.SetIfChanged(daemonID, "mgr/dashboard/url_prefix", c.spec.Dashboard.URLPrefix)
 	if err != nil {
 		return false, err
 	}
 
 	// ssl support
 	ssl := strconv.FormatBool(c.spec.Dashboard.SSL)
-	changed, err := client.SetConfig(c.context, c.clusterInfo, daemonID, "mgr/dashboard/ssl", ssl, false)
+	changed, err := monStore.SetIfChanged(daemonID, "mgr/dashboard/ssl", ssl)
 	if err != nil {
 		return false, err
 	}
@@ -129,7 +131,7 @@ func (c *Cluster) configureDashboardModuleSettings(daemonID string) (bool, error
 
 	// server port
 	port := strconv.Itoa(c.dashboardPort())
-	changed, err = client.SetConfig(c.context, c.clusterInfo, daemonID, "mgr/dashboard/server_port", port, false)
+	changed, err = monStore.SetIfChanged(daemonID, "mgr/dashboard/server_port", port)
 	if err != nil {
 		return false, err
 	}
@@ -137,7 +139,7 @@ func (c *Cluster) configureDashboardModuleSettings(daemonID string) (bool, error
 
 	// SSL enabled. Needed to set specifically the ssl port setting
 	if c.spec.Dashboard.SSL {
-		changed, err = client.SetConfig(c.context, c.clusterInfo, daemonID, "mgr/dashboard/ssl_server_port", port, false)
+		changed, err = monStore.SetIfChanged(daemonID, "mgr/dashboard/ssl_server_port", port)
 		if err != nil {
 			return false, err
 		}
@@ -214,21 +216,6 @@ func FileBasedPasswordSupported(c *client.ClusterInfo) bool {
 	return false
 }
 
-func CreateTempPasswordFile(password string) (*os.File, error) {
-	// Generate a temp file
-	file, err := ioutil.TempFile("", "")
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to generate temp file")
-	}
-
-	// Write password into file
-	err = ioutil.WriteFile(file.Name(), []byte(password), 0440)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to write dashboard password into file")
-	}
-	return file, nil
-}
-
 func (c *Cluster) setLoginCredentials(password string) error {
 	// Set the login credentials. Write the command/args to the debug log so we don't write the password by default to the log.
 	logger.Infof("setting ceph dashboard %q login creds", dashboardUsername)
@@ -237,7 +224,7 @@ func (c *Cluster) setLoginCredentials(password string) error {
 	// for latest Ceph versions
 	if FileBasedPasswordSupported(c.clusterInfo) {
 		// Generate a temp file
-		file, err := CreateTempPasswordFile(password)
+		file, err := util.CreateTempFile(password)
 		if err != nil {
 			return errors.Wrap(err, "failed to create a temporary dashboard password file")
 		}
@@ -265,8 +252,7 @@ func (c *Cluster) setLoginCredentials(password string) error {
 }
 
 func (c *Cluster) getOrGenerateDashboardPassword() (string, error) {
-	ctx := context.TODO()
-	secret, err := c.context.Clientset.CoreV1().Secrets(c.clusterInfo.Namespace).Get(ctx, dashboardPasswordName, metav1.GetOptions{})
+	secret, err := c.context.Clientset.CoreV1().Secrets(c.clusterInfo.Namespace).Get(c.clusterInfo.Context, dashboardPasswordName, metav1.GetOptions{})
 	if err == nil {
 		logger.Info("the dashboard secret was already generated")
 		return decodeSecret(secret)
@@ -298,7 +284,7 @@ func (c *Cluster) getOrGenerateDashboardPassword() (string, error) {
 		return "", errors.Wrapf(err, "failed to set owner reference to dashboard secret %q", secret.Name)
 	}
 
-	_, err = c.context.Clientset.CoreV1().Secrets(c.clusterInfo.Namespace).Create(ctx, secret, metav1.CreateOptions{})
+	_, err = c.context.Clientset.CoreV1().Secrets(c.clusterInfo.Namespace).Create(c.clusterInfo.Context, secret, metav1.CreateOptions{})
 	if err != nil {
 		return "", errors.Wrap(err, "failed to save dashboard secret")
 	}

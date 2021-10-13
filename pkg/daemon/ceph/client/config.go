@@ -18,7 +18,6 @@ limitations under the License.
 package client
 
 import (
-	"context"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -61,13 +60,9 @@ var (
 
 // GlobalConfig represents the [global] sections of Ceph's config file.
 type GlobalConfig struct {
-	FSID           string `ini:"fsid,omitempty"`
-	MonMembers     string `ini:"mon initial members,omitempty"`
-	MonHost        string `ini:"mon host"`
-	PublicAddr     string `ini:"public addr,omitempty"`
-	PublicNetwork  string `ini:"public network,omitempty"`
-	ClusterAddr    string `ini:"cluster addr,omitempty"`
-	ClusterNetwork string `ini:"cluster network,omitempty"`
+	FSID       string `ini:"fsid,omitempty"`
+	MonMembers string `ini:"mon initial members,omitempty"`
+	MonHost    string `ini:"mon host"`
 }
 
 // CephConfig represents an entire Ceph config including all sections.
@@ -143,8 +138,7 @@ func generateConfigFile(context *clusterd.Context, clusterInfo *ClusterInfo, pat
 }
 
 func mergeDefaultConfigWithRookConfigOverride(clusterdContext *clusterd.Context, clusterInfo *ClusterInfo, configFile *ini.File) error {
-	ctx := context.TODO()
-	cm, err := clusterdContext.Clientset.CoreV1().ConfigMaps(clusterInfo.Namespace).Get(ctx, k8sutil.ConfigOverrideName, metav1.GetOptions{})
+	cm, err := clusterdContext.Clientset.CoreV1().ConfigMaps(clusterInfo.Namespace).Get(clusterInfo.Context, k8sutil.ConfigOverrideName, metav1.GetOptions{})
 	if err != nil {
 		if !kerrors.IsNotFound(err) {
 			return errors.Wrapf(err, "failed to read configmap %q", k8sutil.ConfigOverrideName)
@@ -198,13 +192,9 @@ func CreateDefaultCephConfig(context *clusterd.Context, clusterInfo *ClusterInfo
 
 	conf := &CephConfig{
 		GlobalConfig: &GlobalConfig{
-			FSID:           clusterInfo.FSID,
-			MonMembers:     strings.Join(monMembers, " "),
-			MonHost:        strings.Join(monHosts, ","),
-			PublicAddr:     context.NetworkInfo.PublicAddr,
-			PublicNetwork:  context.NetworkInfo.PublicNetwork,
-			ClusterAddr:    context.NetworkInfo.ClusterAddr,
-			ClusterNetwork: context.NetworkInfo.ClusterNetwork,
+			FSID:       clusterInfo.FSID,
+			MonMembers: strings.Join(monMembers, " "),
+			MonHost:    strings.Join(monHosts, ","),
 		},
 	}
 
@@ -307,32 +297,4 @@ func WriteCephConfig(context *clusterd.Context, clusterInfo *ClusterInfo) error 
 		logger.Warningf("wrote and copied config file but failed to read it back from %s for logging. %v", DefaultConfigFilePath(), err)
 	}
 	return nil
-}
-
-// SetConfig applies a setting for a single mgr daemon
-func SetConfig(context *clusterd.Context, clusterInfo *ClusterInfo, daemonID string, key, val string, force bool) (bool, error) {
-	var getArgs, setArgs []string
-	getArgs = append(getArgs, "config", "get", daemonID, key)
-	if val == "" {
-		setArgs = append(setArgs, "config", "rm", daemonID, key)
-	} else {
-		setArgs = append(setArgs, "config", "set", daemonID, key, val)
-	}
-	if force {
-		setArgs = append(setArgs, "--force")
-	}
-
-	// Retrieve previous value to monitor changes
-	var prevVal string
-	buf, err := NewCephCommand(context, clusterInfo, getArgs).Run()
-	if err == nil {
-		prevVal = strings.TrimSpace(string(buf))
-	}
-
-	if _, err := NewCephCommand(context, clusterInfo, setArgs).Run(); err != nil {
-		return false, errors.Wrapf(err, "failed to set config key %s to %q", key, val)
-	}
-
-	hasChanged := prevVal != val
-	return hasChanged, nil
 }

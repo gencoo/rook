@@ -21,7 +21,6 @@ import (
 	"testing"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	"github.com/rook/rook/pkg/apis/rook.io"
 	"github.com/rook/rook/pkg/clusterd"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/osd/config"
@@ -32,6 +31,7 @@ import (
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/kubernetes/fake"
@@ -60,12 +60,10 @@ func TestPodContainer(t *testing.T) {
 	logger.Infof("container: %+v", container)
 	assert.Equal(t, "copy-binaries", container.Args[0])
 	container = c.Spec.Containers[0]
-	assert.Equal(t, "/rook/tini", container.Command[0])
-	assert.Equal(t, "--", container.Args[0])
-	assert.Equal(t, "/rook/rook", container.Args[1])
-	assert.Equal(t, "ceph", container.Args[2])
-	assert.Equal(t, "osd", container.Args[3])
-	assert.Equal(t, "provision", container.Args[4])
+	assert.Equal(t, "/rook/rook", container.Command[0])
+	assert.Equal(t, "ceph", container.Args[0])
+	assert.Equal(t, "osd", container.Args[1])
+	assert.Equal(t, "provision", container.Args[2])
 
 	for _, c := range c.Spec.Containers {
 		vars := operatortest.FindDuplicateEnvVars(c)
@@ -99,7 +97,7 @@ func testPodDevices(t *testing.T, dataDir, deviceName string, allDevices bool) {
 			Selection: cephv1.Selection{UseAllDevices: &allDevices, DeviceFilter: deviceName},
 			Nodes:     []cephv1.Node{{Name: "node1"}},
 		},
-		PriorityClassNames: map[rook.KeyType]string{
+		PriorityClassNames: map[cephv1.KeyType]string{
 			cephv1.KeyOSD: "my-priority-class",
 		},
 		Annotations: cephv1.AnnotationsSpec{
@@ -706,4 +704,165 @@ func getDummyDeploymentOnNode(clientset *fake.Clientset, c *Cluster, nodeName st
 		panic(err)
 	}
 	return d
+}
+
+func TestOSDPlacement(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	clusterInfo := &cephclient.ClusterInfo{
+		Namespace:   "ns",
+		CephVersion: cephver.Nautilus,
+	}
+	clusterInfo.SetName("testing")
+	clusterInfo.OwnerInfo = cephclient.NewMinimumOwnerInfo(t)
+	context := &clusterd.Context{Clientset: clientset, ConfigDir: "/var/lib/rook", Executor: &exectest.MockExecutor{}}
+
+	spec := cephv1.ClusterSpec{
+		Placement: cephv1.PlacementSpec{
+			"all": {
+				NodeAffinity: &v1.NodeAffinity{
+					RequiredDuringSchedulingIgnoredDuringExecution: &v1.NodeSelector{
+						NodeSelectorTerms: []v1.NodeSelectorTerm{
+							{
+								MatchExpressions: []v1.NodeSelectorRequirement{{
+									Key:      "role",
+									Operator: v1.NodeSelectorOpIn,
+									Values:   []string{"storage-node1"},
+								}},
+							},
+						},
+					},
+				},
+			},
+			"osd": {
+				NodeAffinity: &v1.NodeAffinity{
+					RequiredDuringSchedulingIgnoredDuringExecution: &v1.NodeSelector{
+						NodeSelectorTerms: []v1.NodeSelectorTerm{
+							{
+								MatchExpressions: []v1.NodeSelectorRequirement{{
+									Key:      "role",
+									Operator: v1.NodeSelectorOpIn,
+									Values:   []string{"storage-node1"},
+								}},
+							},
+						},
+					},
+				},
+			},
+			"prepareosd": {
+				NodeAffinity: &v1.NodeAffinity{
+					RequiredDuringSchedulingIgnoredDuringExecution: &v1.NodeSelector{
+						NodeSelectorTerms: []v1.NodeSelectorTerm{
+							{
+								MatchExpressions: []v1.NodeSelectorRequirement{{
+									Key:      "role",
+									Operator: v1.NodeSelectorOpIn,
+									Values:   []string{"storage-node1"},
+								}},
+							},
+						},
+					},
+				},
+			},
+		},
+		Storage: cephv1.StorageScopeSpec{
+			OnlyApplyOSDPlacement: false,
+		},
+	}
+
+	osdProps := osdProperties{
+		pvc: v1.PersistentVolumeClaimVolumeSource{
+			ClaimName: "pvc1",
+		},
+	}
+	osdProps.placement = cephv1.Placement{NodeAffinity: &corev1.NodeAffinity{
+		RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+			NodeSelectorTerms: []corev1.NodeSelectorTerm{
+				{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{
+							Key:      "role",
+							Operator: v1.NodeSelectorOpIn,
+							Values:   []string{"storage-node3"},
+						},
+					},
+				},
+			},
+		},
+	},
+	}
+
+	osdProps.preparePlacement = &cephv1.Placement{NodeAffinity: &corev1.NodeAffinity{
+		RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+			NodeSelectorTerms: []corev1.NodeSelectorTerm{
+				{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{
+							Key:      "role",
+							Operator: v1.NodeSelectorOpIn,
+							Values:   []string{"storage-node3"},
+						},
+					},
+				},
+			},
+		},
+	},
+	}
+
+	c := New(context, clusterInfo, spec, "rook/rook:myversion")
+	osd := OSDInfo{
+		ID:     0,
+		CVMode: "raw",
+	}
+
+	dataPathMap := &provisionConfig{
+		DataPathMap: opconfig.NewDatalessDaemonDataPathMap(c.clusterInfo.Namespace, "/var/lib/rook"),
+	}
+
+	// For OSD daemon
+	// When OnlyApplyOSDPlacement false, in case of PVC
+	r, err := c.makeDeployment(osdProps, osd, dataPathMap)
+	assert.NoError(t, err)
+	assert.Equal(t, 2, len(r.Spec.Template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[0].MatchExpressions))
+
+	// For OSD-prepare job
+	job, err := c.makeJob(osdProps, dataPathMap)
+	assert.NoError(t, err)
+	assert.Equal(t, 2, len(job.Spec.Template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[0].MatchExpressions))
+
+	// When OnlyApplyOSDPlacement true, in case of PVC
+	spec.Storage.OnlyApplyOSDPlacement = true
+	c = New(context, clusterInfo, spec, "rook/rook:myversion")
+	r, err = c.makeDeployment(osdProps, osd, dataPathMap)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, len(r.Spec.Template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[0].MatchExpressions))
+
+	// For OSD-prepare job
+	job, err = c.makeJob(osdProps, dataPathMap)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, len(job.Spec.Template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[0].MatchExpressions))
+
+	// When OnlyApplyOSDPlacement false, in case of non-PVC
+	spec.Storage.OnlyApplyOSDPlacement = false
+	osdProps = osdProperties{}
+	c = New(context, clusterInfo, spec, "rook/rook:myversion")
+	r, err = c.makeDeployment(osdProps, osd, dataPathMap)
+	assert.NoError(t, err)
+	assert.Equal(t, 2, len(r.Spec.Template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[0].MatchExpressions))
+
+	// For OSD-prepare job
+	job, err = c.makeJob(osdProps, dataPathMap)
+	assert.NoError(t, err)
+	assert.Equal(t, 2, len(job.Spec.Template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[0].MatchExpressions))
+
+	// When OnlyApplyOSDPlacement true, in case of non-PVC
+	spec.Storage.OnlyApplyOSDPlacement = true
+	c = New(context, clusterInfo, spec, "rook/rook:myversion")
+	r, err = c.makeDeployment(osdProps, osd, dataPathMap)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, len(r.Spec.Template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[0].MatchExpressions))
+
+	// For OSD-prepare job
+	job, err = c.makeJob(osdProps, dataPathMap)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, len(job.Spec.Template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[0].MatchExpressions))
 }

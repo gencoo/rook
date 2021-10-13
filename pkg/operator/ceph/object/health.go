@@ -88,7 +88,7 @@ func newBucketChecker(
 }
 
 // checkObjectStore periodically checks the health of the cluster
-func (c *bucketChecker) checkObjectStore(stopCh chan struct{}) {
+func (c *bucketChecker) checkObjectStore(context context.Context) {
 	// check the object store health immediately before starting the loop
 	err := c.checkObjectStoreHealth()
 	if err != nil {
@@ -98,7 +98,7 @@ func (c *bucketChecker) checkObjectStore(stopCh chan struct{}) {
 
 	for {
 		select {
-		case <-stopCh:
+		case <-context.Done():
 			// purge bucket and s3 user
 			// Needed for external mode where in converged everything goes away with the CR deletion
 			c.cleanupHealthCheck()
@@ -146,10 +146,10 @@ func (c *bucketChecker) checkObjectStoreHealth() error {
 	// Create checker user
 	logger.Debugf("creating s3 user object %q for object store %q health check", userConfig.ID, c.namespacedName.Name)
 	var user admin.User
-	user, err := c.objContext.AdminOpsClient.GetUser(context.TODO(), userConfig)
+	user, err := c.objContext.AdminOpsClient.GetUser(c.objContext.clusterInfo.Context, userConfig)
 	if err != nil {
 		if errors.Is(err, admin.ErrNoSuchUser) {
-			user, err = c.objContext.AdminOpsClient.CreateUser(context.TODO(), userConfig)
+			user, err = c.objContext.AdminOpsClient.CreateUser(c.objContext.clusterInfo.Context, userConfig)
 			if err != nil {
 				return errors.Wrapf(err, "failed to create from ceph object user %v", userConfig.ID)
 			}
@@ -159,14 +159,13 @@ func (c *bucketChecker) checkObjectStoreHealth() error {
 	}
 
 	// Set access and secret key
-	tlsCert := c.objContext.TlsCert
 	s3endpoint := c.objContext.Endpoint
 	s3AccessKey := user.Keys[0].AccessKey
 	s3SecretKey := user.Keys[0].SecretKey
 
 	// Initiate s3 agent
 	logger.Debugf("initializing s3 connection for object store %q", c.namespacedName.Name)
-	s3client, err := NewS3Agent(s3AccessKey, s3SecretKey, s3endpoint, false, tlsCert)
+	s3client, err := NewInsecureS3Agent(s3AccessKey, s3SecretKey, s3endpoint, "", false)
 	if err != nil {
 		return errors.Wrap(err, "failed to initialize s3 connection")
 	}
@@ -202,7 +201,7 @@ func (c *bucketChecker) cleanupHealthCheck() {
 	logger.Infof("deleting object %q from bucket %q in object store %q", s3HealthCheckObjectKey, bucketToDelete, c.namespacedName.Name)
 
 	thePurge := true
-	err := c.objContext.AdminOpsClient.RemoveBucket(context.TODO(), admin.Bucket{Bucket: bucketToDelete, PurgeObject: &thePurge})
+	err := c.objContext.AdminOpsClient.RemoveBucket(c.objContext.clusterInfo.Context, admin.Bucket{Bucket: bucketToDelete, PurgeObject: &thePurge})
 	if err != nil {
 		if errors.Is(err, admin.ErrNoSuchBucket) {
 			// opinion: "not found" is not an error
@@ -213,7 +212,7 @@ func (c *bucketChecker) cleanupHealthCheck() {
 	}
 
 	userToDelete := genUserCheckerConfig(c.objContext.UID)
-	err = c.objContext.AdminOpsClient.RemoveUser(context.TODO(), userToDelete)
+	err = c.objContext.AdminOpsClient.RemoveUser(c.objContext.clusterInfo.Context, userToDelete)
 	if err != nil && !errors.Is(err, admin.ErrNoSuchUser) {
 		logger.Errorf("failed to delete object user %q for object store %q. %v", userToDelete.ID, c.namespacedName.Name, err)
 	}

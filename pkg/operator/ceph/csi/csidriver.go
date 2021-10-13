@@ -72,6 +72,8 @@ func (d v1CsiDriver) createCSIDriverInfo(ctx context.Context, clientset kubernet
 	// As FSGroupPolicy field is immutable, should be set only during create time.
 	// if the request is to change the FSGroupPolicy, we are deleting the CSIDriver object and creating it.
 	if driver.Spec.FSGroupPolicy != nil && csiDriver.Spec.FSGroupPolicy != nil && *driver.Spec.FSGroupPolicy != *csiDriver.Spec.FSGroupPolicy {
+		d.csiClient = csidrivers
+		d.csiDriver = csiDriver
 		return d.reCreateCSIDriverInfo(ctx)
 	}
 
@@ -88,18 +90,16 @@ func (d v1CsiDriver) createCSIDriverInfo(ctx context.Context, clientset kubernet
 }
 
 func (d v1CsiDriver) reCreateCSIDriverInfo(ctx context.Context) error {
-	csiDriver := d.csiDriver
-	csiClient := d.csiClient
-	err := csiClient.Delete(ctx, csiDriver.Name, metav1.DeleteOptions{})
+	err := d.csiClient.Delete(ctx, d.csiDriver.Name, metav1.DeleteOptions{})
 	if err != nil {
-		return errors.Wrapf(err, "failed to delete CSIDriver object for driver %q", csiDriver.Name)
+		return errors.Wrapf(err, "failed to delete CSIDriver object for driver %q", d.csiDriver.Name)
 	}
-	logger.Infof("CSIDriver object deleted for driver %q", csiDriver.Name)
-	_, err = csiClient.Create(ctx, d.csiDriver, metav1.CreateOptions{})
+	logger.Infof("CSIDriver object deleted for driver %q", d.csiDriver.Name)
+	_, err = d.csiClient.Create(ctx, d.csiDriver, metav1.CreateOptions{})
 	if err != nil {
-		return errors.Wrapf(err, "failed to recreate CSIDriver object for driver %q", csiDriver.Name)
+		return errors.Wrapf(err, "failed to recreate CSIDriver object for driver %q", d.csiDriver.Name)
 	}
-	logger.Infof("CSIDriver object recreated for driver %q", csiDriver.Name)
+	logger.Infof("CSIDriver object recreated for driver %q", d.csiDriver.Name)
 	return nil
 }
 
@@ -108,7 +108,7 @@ func (d v1CsiDriver) deleteCSIDriverInfo(ctx context.Context, clientset kubernet
 	err := clientset.StorageV1().CSIDrivers().Delete(ctx, name, metav1.DeleteOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			logger.Debug("%s CSIDriver not found; skipping deletion.", name)
+			logger.Debugf("%s CSIDriver not found; skipping deletion.", name)
 			return nil
 		}
 	}

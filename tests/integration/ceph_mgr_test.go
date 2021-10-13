@@ -19,17 +19,22 @@ package integration
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/stretchr/testify/require"
 	"os/exec"
 	"sort"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	"github.com/rook/rook/tests/framework/installer"
 	"github.com/rook/rook/tests/framework/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
+)
+
+const (
+	defaultTries = 3
 )
 
 // **************************************************
@@ -91,15 +96,15 @@ func (s *CephMgrSuite) SetupSuite() {
 		UseHelm:           false,
 		UsePVC:            false,
 		Mons:              1,
-		UseCSI:            true,
 		SkipOSDCreation:   true,
-		EnableDiscovery:   true,
-		RookVersion:       installer.VersionMaster,
+		EnableDiscovery:   false,
+		RookVersion:       installer.LocalBuildTag,
 		CephVersion:       installer.MasterVersion,
 	}
 	s.settings.ApplyEnvVars()
-	s.installer, s.k8sh = StartTestCluster(s.T, s.settings, cephMasterSuiteMinimalTestVersion)
+	s.installer, s.k8sh = StartTestCluster(s.T, s.settings)
 	s.waitForOrchestrationModule()
+	s.prepareLocalStorageClass("local-storage")
 }
 
 func (s *CephMgrSuite) AfterTest(suiteName, testName string) {
@@ -107,12 +112,56 @@ func (s *CephMgrSuite) AfterTest(suiteName, testName string) {
 }
 
 func (s *CephMgrSuite) TearDownSuite() {
+	_ = s.k8sh.DeleteResource("sc", "local-storage")
 	s.installer.UninstallRook()
 }
 
-func (s *CephMgrSuite) execute(command []string) (error, string) {
-	orchCommand := append([]string{"orch"}, command...)
-	return s.installer.Execute("ceph", orchCommand, s.namespace)
+func (s *CephMgrSuite) executeWithRetry(command []string, maxRetries int) (string, error) {
+	tries := 0
+	orchestratorCommand := append([]string{"orch"}, command...)
+	for {
+		err, output := s.installer.Execute("ceph", orchestratorCommand, s.namespace)
+		tries++
+		if err != nil  {
+			if maxRetries == 1 {
+				return output, err
+			}
+			if tries == maxRetries {
+				return "", fmt.Errorf("max retries(%d) reached, last err: %v", tries, err)
+			}
+			logger.Infof("retrying command <<ceph %s>>: last error: %v", command, err)
+			continue
+		}
+		return output, nil
+	}
+}
+
+func (s *CephMgrSuite) execute(command []string) (string, error) {
+	return s.executeWithRetry(command, 1)
+}
+
+func (s *CephMgrSuite) prepareLocalStorageClass(storageClassName string) {
+	// Rook orchestrator use PVs based in this storage class to create OSDs
+	// It is also needed to list "devices"
+	localStorageClass := `
+kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+  name: ` + storageClassName + `
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+`
+	err := s.k8sh.ResourceOperation("apply", localStorageClass)
+	if err == nil {
+		err, _ = s.installer.Execute("ceph", []string{"config", "set", "mgr", "mgr/rook/storage_class", storageClassName}, s.namespace)
+		if err == nil {
+			logger.Infof("Storage class %q set in manager config", storageClassName)
+		} else {
+			assert.Fail(s.T(), fmt.Sprintf("Error configuring local storage class in manager config: %q", err))
+		}
+	} else {
+		assert.Fail(s.T(), fmt.Sprintf("Error creating local storage class: %q ", err))
+	}
 }
 
 func (s *CephMgrSuite) enableOrchestratorModule() {
@@ -125,7 +174,7 @@ func (s *CephMgrSuite) enableOrchestratorModule() {
 	}
 
 	logger.Info("Setting orchestrator backend to Rook .... <ceph orch set backend rook>")
-	err, output = s.execute([]string{"set", "backend", "rook"})
+	output, err = s.execute([]string{"set", "backend", "rook"})
 	logger.Infof("output: %s", output)
 	if err != nil {
 		logger.Infof("Not possible to set rook as backend orchestrator module: %q", err)
@@ -143,15 +192,17 @@ func (s *CephMgrSuite) waitForOrchestrationModule() {
 
 	for timeout := 0; timeout < 30; timeout++ {
 		logger.Info("Waiting for rook orchestrator module enabled and ready ...")
-		err, output := s.execute([]string{"status", "--format", "json"})
+		output, err := s.execute([]string{"status", "--format", "json"})
 		logger.Infof("%s", output)
 		if err == nil {
 			logger.Info("Ceph orchestrator ready to execute commands")
 
 			// Get status information
 			bytes := []byte(output)
+			logBytesInfo(bytes)
+
 			var status orchStatus
-			err := json.Unmarshal(bytes, &status)
+			err := json.Unmarshal(bytes[:len(output)], &status)
 			if err != nil {
 				logger.Error("Error getting ceph orch status")
 				continue
@@ -181,39 +232,48 @@ func (s *CephMgrSuite) waitForOrchestrationModule() {
 }
 func (s *CephMgrSuite) TestDeviceLs() {
 	logger.Info("Testing .... <ceph orch device ls>")
-	err, device_list := s.execute([]string{"device", "ls"})
+	deviceList, err := s.executeWithRetry([]string{"device", "ls"}, defaultTries)
 	assert.Nil(s.T(), err)
-	logger.Infof("output = %s", device_list)
+	logger.Infof("output = %s", deviceList)
 }
 
 func (s *CephMgrSuite) TestStatus() {
 	logger.Info("Testing .... <ceph orch status>")
-	err, status := s.execute([]string{"status"})
+	status, err := s.executeWithRetry([]string{"status"}, defaultTries)
 	assert.Nil(s.T(), err)
 	logger.Infof("output = %s", status)
 
 	assert.Equal(s.T(), status, "Backend: rook\nAvailable: Yes")
 }
 
+func logBytesInfo(bytesSlice []byte) {
+	logger.Infof("---- bytes slice info ---")
+	logger.Infof("bytes: %v\n", bytesSlice)
+	logger.Infof("length: %d\n", len(bytesSlice))
+	logger.Infof("string: -->%s<--\n", string(bytesSlice))
+	logger.Infof("-------------------------")
+}
+
 func (s *CephMgrSuite) TestHostLs() {
 	logger.Info("Testing .... <ceph orch host ls>")
 
 	// Get the orchestrator hosts
-	err, output := s.execute([]string{"host", "ls", "json"})
+	output, err := s.executeWithRetry([]string{"host", "ls", "json"}, defaultTries)
 	assert.Nil(s.T(), err)
 	logger.Infof("output = %s", output)
 
 	hosts := []byte(output)
-	var hostsList []host
+	logBytesInfo(hosts)
 
-	err = json.Unmarshal(hosts, &hostsList)
+	var hostsList []host
+	err = json.Unmarshal(hosts[:len(output)], &hostsList)
 	if err != nil {
 		assert.Nil(s.T(), err)
 	}
 
 	var hostOutput []string
 	for _, hostItem := range hostsList {
-		hostOutput = append(hostOutput, hostItem.Addr)
+		hostOutput = append(hostOutput, hostItem.Hostname)
 	}
 	sort.Strings(hostOutput)
 
@@ -233,14 +293,15 @@ func (s *CephMgrSuite) TestHostLs() {
 
 func (s *CephMgrSuite) TestServiceLs() {
 	logger.Info("Testing .... <ceph orch ls --format json>")
-	err, output := s.execute([]string{"ls", "--format", "json"})
+	output, err := s.executeWithRetry([]string{"ls", "--format", "json"}, defaultTries)
 	assert.Nil(s.T(), err)
 	logger.Infof("output = %s", output)
 
 	services := []byte(output)
-	var servicesList []service
+	logBytesInfo(services)
 
-	err = json.Unmarshal(services, &servicesList)
+	var servicesList []service
+	err = json.Unmarshal(services[:len(output)], &servicesList)
 	assert.Nil(s.T(), err)
 
 	labelFilter := ""

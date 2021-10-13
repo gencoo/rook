@@ -159,7 +159,7 @@ The Rook toolbox contains the Ceph tools that can give you status details of the
 `ceph status` command. Let's look at an output sample and review some of the details:
 
 ```sh
-TOOLS_POD=$(kubectl -n $ROOK_CLUSTER_NAMESPACE get pod -l "app=rook-ceph-tools" -o jsonpath='{.items[0].metadata.name}')
+TOOLS_POD=$(kubectl -n $ROOK_CLUSTER_NAMESPACE get pod -l "app=rook-ceph-tools" -o jsonpath='{.items[*].metadata.name}')
 kubectl -n $ROOK_CLUSTER_NAMESPACE exec -it $TOOLS_POD -- ceph status
 ```
 
@@ -272,12 +272,7 @@ Let's get started!
 First apply updates to Rook-Ceph common resources. This includes slightly modified privileges (RBAC)
 needed by the Operator. Also update the Custom Resource Definitions (CRDs).
 
-> **IMPORTANT:** If you are using Kubernetes version v1.15 or lower, you will need to manually
-> modify the `common.yaml` file to use
-> `rbac.authorization.k8s.io/v1beta1` instead of `rbac.authorization.k8s.io/v1`
-> You will also need to apply `pre-k8s-1.16/crds.yaml` instead of `crds.yaml`.
-
-First get the latest common resources manifests that contain the latest changes.
+Get the latest common resources manifests that contain the latest changes.
 ```sh
 git clone --single-branch --depth=1 --branch v1.7.0 https://github.com/rook/rook.git
 cd rook/cluster/examples/kubernetes/ceph
@@ -373,6 +368,34 @@ At this point, your Rook operator should be running version `rook/ceph:v1.7.0`.
 
 Verify the Ceph cluster's health using the [health verification section](#health-verification).
 
+### **6. Update CephRBDMirror and CephBlockPool configs**
+
+If you are not using a `CephRBDMirror` in your Rook cluster, you may disregard this section.
+
+Otherwise, please note that the location of the `CephRBDMirror` `spec.peers` config has moved to
+`CephBlockPool` `spec.mirroring.peers` in Rook v1.7. This change allows each pool to have its own
+peer and enables pools to re-use an existing peer secret if it points to the same cluster peer.
+
+You may wish to see the [CephBlockPool spec Documentation](ceph-pool-crd.md#spec) for the latest
+configuration advice.
+
+The pre-existing config location in `CephRBDMirror` `spec.peers` will continue to be supported, but
+users are still encouraged to migrate this setting from `CephRBDMirror` to relevant `CephBlockPool`
+resources.
+
+To migrate the setting, follow these steps:
+1. Stop the Rook-Ceph operator by downscaling the Deployment to zero replicas.
+   ```sh
+   kubectl -n $ROOK_OPERATOR_NAMESPACE scale deployment rook-ceph-operator --replicas=0
+   ```
+2. Copy the `spec.peers` config from `CephRBDMirror` to every `CephBlockPool` in your cluster that
+   has mirroring enabled.
+3. Remove the `peers` spec from the `CephRBDMirror` resource.
+4. Resume the Rook-Ceph operator by scaling the Deployment back to one replica.
+   ```sh
+   kubectl -n $ROOK_OPERATOR_NAMESPACE scale deployment rook-ceph-operator --replicas=1
+   ```
+
 
 ## Ceph Version Upgrades
 
@@ -398,9 +421,11 @@ until all the daemons have been updated.
 ### **Ceph images**
 
 Official Ceph container images can be found on [Quay](https://quay.io/repository/ceph/ceph?tab=tags).
+Prior to August 2021, official images were on docker.io. While those images will remain on Docker Hub, all new images are being pushed to Quay.
+
 These images are tagged in a few ways:
 
-* The most explicit form of tags are full-ceph-version-and-build tags (e.g., `v16.2.5-20210708`).
+* The most explicit form of tags are full-ceph-version-and-build tags (e.g., `v16.2.6-20210918`).
   These tags are recommended for production clusters, as there is no possibility for the cluster to
   be heterogeneous with respect to the version of Ceph running in containers.
 * Ceph major version tags (e.g., `v16`) are useful for development and test clusters so that the
@@ -408,7 +433,7 @@ These images are tagged in a few ways:
 
 **Ceph containers other than the official images from the registry above will not be supported.**
 
-### **Example upgrade to Ceph Octopus**
+### **Example upgrade to Ceph Pacific**
 
 #### **1. Update the main Ceph daemons**
 
@@ -416,7 +441,7 @@ The majority of the upgrade will be handled by the Rook operator. Begin the upgr
 Ceph image field in the cluster CRD (`spec.cephVersion.image`).
 
 ```sh
-NEW_CEPH_IMAGE='quay.io/ceph/ceph:v16.2.5-20210708'
+NEW_CEPH_IMAGE='quay.io/ceph/ceph:v16.2.6-20210918'
 CLUSTER_NAME="$ROOK_CLUSTER_NAMESPACE"  # change if your cluster name is not the Rook namespace
 kubectl -n $ROOK_CLUSTER_NAMESPACE patch CephCluster $CLUSTER_NAME --type=merge -p "{\"spec\": {\"cephVersion\": {\"image\": \"$NEW_CEPH_IMAGE\"}}}"
 ```
@@ -436,9 +461,9 @@ Determining when the Ceph has fully updated is rather simple.
 kubectl -n $ROOK_CLUSTER_NAMESPACE get deployment -l rook_cluster=$ROOK_CLUSTER_NAMESPACE -o jsonpath='{range .items[*]}{"ceph-version="}{.metadata.labels.ceph-version}{"\n"}{end}' | sort | uniq
 This cluster is not yet finished:
     ceph-version=15.2.13-0
-    ceph-version=16.2.5-0
+    ceph-version=16.2.6-0
 This cluster is finished:
-    ceph-version=16.2.5-0
+    ceph-version=16.2.6-0
 ```
 
 #### **3. Verify the updated cluster**
@@ -463,12 +488,12 @@ kubectl -n $ROOK_OPERATOR_NAMESPACE edit configmap rook-ceph-operator-config
 The default upstream images are included below, which you can change to your desired images.
 
 ```yaml
-ROOK_CSI_CEPH_IMAGE: "quay.io/cephcsi/cephcsi:v3.3.1"
-ROOK_CSI_REGISTRAR_IMAGE: "k8s.gcr.io/sig-storage/csi-node-driver-registrar:v2.2.0"
-ROOK_CSI_PROVISIONER_IMAGE: "k8s.gcr.io/sig-storage/csi-provisioner:v2.2.2"
-ROOK_CSI_ATTACHER_IMAGE: "k8s.gcr.io/sig-storage/csi-attacher:v3.2.1"
-ROOK_CSI_RESIZER_IMAGE: "k8s.gcr.io/sig-storage/csi-resizer:v1.2.0"
-ROOK_CSI_SNAPSHOTTER_IMAGE: "k8s.gcr.io/sig-storage/csi-snapshotter:v4.1.1"
+ROOK_CSI_CEPH_IMAGE: "quay.io/cephcsi/cephcsi:v3.4.0"
+ROOK_CSI_REGISTRAR_IMAGE: "k8s.gcr.io/sig-storage/csi-node-driver-registrar:v2.3.0"
+ROOK_CSI_PROVISIONER_IMAGE: "k8s.gcr.io/sig-storage/csi-provisioner:v3.0.0"
+ROOK_CSI_ATTACHER_IMAGE: "k8s.gcr.io/sig-storage/csi-attacher:v3.3.0"
+ROOK_CSI_RESIZER_IMAGE: "k8s.gcr.io/sig-storage/csi-resizer:v1.3.0"
+ROOK_CSI_SNAPSHOTTER_IMAGE: "k8s.gcr.io/sig-storage/csi-snapshotter:v4.2.0"
 CSI_VOLUME_REPLICATION_IMAGE: "quay.io/csiaddons/volumereplication-operator:v0.1.0"
 ```
 
@@ -488,11 +513,11 @@ kubectl --namespace rook-ceph get pod -o jsonpath='{range .items[*]}{range .spec
 ```
 
 ```
-k8s.gcr.io/sig-storage/csi-attacher:v3.2.1
-k8s.gcr.io/sig-storage/csi-node-driver-registrar:v2.2.0
-k8s.gcr.io/sig-storage/csi-provisioner:v2.2.2
-k8s.gcr.io/sig-storage/csi-resizer:v1.2.0
-k8s.gcr.io/sig-storage/csi-snapshotter:v4.1.1
-quay.io/cephcsi/cephcsi:v3.3.1
+k8s.gcr.io/sig-storage/csi-attacher:v3.3.0
+k8s.gcr.io/sig-storage/csi-node-driver-registrar:v2.3.0
+k8s.gcr.io/sig-storage/csi-provisioner:v3.0.0
+k8s.gcr.io/sig-storage/csi-resizer:v1.3.0
+k8s.gcr.io/sig-storage/csi-snapshotter:v4.2.0
+quay.io/cephcsi/cephcsi:v3.4.0
 quay.io/csiaddons/volumereplication-operator:v0.1.0
 ```

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 include build/makelib/common.mk
+include build/makelib/helm.mk
 
 .PHONY: all
 all: build
@@ -62,7 +63,7 @@ SERVER_PLATFORMS := $(filter linux_%,$(PLATFORMS))
 CLIENT_PLATFORMS := $(filter-out linux_%,$(PLATFORMS))
 
 # server projects that we build on server platforms
-SERVER_PACKAGES = $(GO_PROJECT)/cmd/rook $(GO_PROJECT)/cmd/rookflex
+SERVER_PACKAGES = $(GO_PROJECT)/cmd/rook
 
 # tests packages that will be compiled into binaries
 TEST_PACKAGES = $(GO_PROJECT)/tests/integration
@@ -96,9 +97,6 @@ GO_TEST_FILTER=$(TESTFILTER)
 
 include build/makelib/golang.mk
 
-# setup helm charts
-include build/makelib/helm.mk
-
 # ====================================================================================
 # Targets
 
@@ -109,6 +107,7 @@ build.version:
 build.common: build.version helm.build mod.check
 	@$(MAKE) go.init
 	@$(MAKE) go.validate
+	@$(MAKE) -C images/ceph list-image
 
 do.build.platform.%:
 	@$(MAKE) PLATFORM=$* go.build
@@ -176,6 +175,9 @@ csv-clean: ## Remove existing OLM files.
 crds: $(CONTROLLER_GEN) $(YQ)
 	@echo Updating CRD manifests
 	@build/crds/build-crds.sh $(CONTROLLER_GEN) $(YQ)
+
+gen-rbac: $(HELM) ## generate RBAC from Helm charts
+	HELM=$(HELM) ./build/rbac/get-helm-rbac.sh
 
 .PHONY: all build.common cross.build.parallel
 .PHONY: build build.all install test check vet fmt codegen mod.check clean distclean prune

@@ -69,15 +69,14 @@ func (h *HelmSuite) SetupSuite() {
 		UseHelm:                   true,
 		UsePVC:                    false,
 		Mons:                      1,
-		UseCSI:                    true,
 		SkipOSDCreation:           false,
 		EnableAdmissionController: false,
 		EnableDiscovery:           true,
-		RookVersion:               installer.VersionMaster,
+		RookVersion:               installer.LocalBuildTag,
 		CephVersion:               installer.OctopusVersion,
 	}
 	h.settings.ApplyEnvVars()
-	h.installer, h.k8shelper = StartTestCluster(h.T, h.settings, helmMinimalTestVersion)
+	h.installer, h.k8shelper = StartTestCluster(h.T, h.settings)
 	h.helper = clients.CreateTestClient(h.k8shelper, h.installer.Manifests)
 }
 
@@ -106,5 +105,7 @@ func (h *HelmSuite) TestFileStoreOnRookInstalledViaHelm() {
 
 // Test Object StoreCreation on Rook that was installed via helm
 func (h *HelmSuite) TestObjectStoreOnRookInstalledViaHelm() {
-	runObjectE2ETestLite(h.helper, h.k8shelper, h.Suite, h.settings, "default", 3, true)
+	deleteStore := true
+	tls := false
+	runObjectE2ETestLite(h.T(), h.helper, h.k8shelper, h.settings.Namespace, "default", 3, deleteStore, tls)
 }

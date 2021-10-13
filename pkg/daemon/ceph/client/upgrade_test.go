@@ -300,7 +300,7 @@ func TestGetRetryConfig(t *testing.T) {
 }
 
 func TestOSDUpdateShouldCheckOkToStop(t *testing.T) {
-	clusterInfo := &ClusterInfo{}
+	clusterInfo := AdminClusterInfo("mycluster")
 	lsOutput := ""
 	treeOutput := ""
 	context := &clusterd.Context{
@@ -355,6 +355,13 @@ func TestOSDUpdateShouldCheckOkToStop(t *testing.T) {
 	t.Run("0 nodes", func(t *testing.T) {
 		lsOutput = fake.OsdLsOutput(0)
 		treeOutput = fake.OsdTreeOutput(0, 0)
+		assert.False(t, OSDUpdateShouldCheckOkToStop(context, clusterInfo))
+	})
+
+	// degraded case, OSDs are failing to start so they haven't registered in the CRUSH map yet
+	t.Run("0 nodes with down OSDs", func(t *testing.T) {
+		lsOutput = fake.OsdLsOutput(3)
+		treeOutput = fake.OsdTreeOutput(0, 1)
 		assert.False(t, OSDUpdateShouldCheckOkToStop(context, clusterInfo))
 	})
 }

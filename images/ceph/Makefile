@@ -18,9 +18,9 @@ include ../image.mk
 # Image Build Options
 
 ifeq ($(GOARCH),amd64)
-CEPH_VERSION = v16.2.5-20210708
+CEPH_VERSION = v16.2.6-20210918
 else
-CEPH_VERSION = v16.2.5-20210708
+CEPH_VERSION = v16.2.6-20210918
 endif
 REGISTRY_NAME = quay.io
 BASEIMAGE = $(REGISTRY_NAME)/ceph/ceph-$(GOARCH):$(CEPH_VERSION)
@@ -29,6 +29,7 @@ OPERATOR_SDK_VERSION = v0.17.1
 # TODO: update to yq v4 - v3 end of life in Aug 2021 ; v4 removes the 'yq delete' cmd and changes syntax
 YQ_VERSION = 3.3.0
 GOHOST := GOOS=$(GOHOSTOS) GOARCH=$(GOHOSTARCH) go
+MANIFESTS_DIR=../../cluster/examples/kubernetes/ceph
 
 TEMP := $(shell mktemp -d)
 
@@ -46,6 +47,11 @@ $(info NOT INCLUDING OLM/CSV TEMPLATES!)
 $(info )
 endif
 
+VOL_REPL_VERSION = v0.1.0
+VOL_REPL_URL = https://raw.githubusercontent.com/csi-addons/volume-replication-operator/$(VOL_REPL_VERSION)/config/crd/bases
+VOLUME_REPLICATION_CRD = replication.storage.openshift.io_volumereplications.yaml
+VOLUME_REPLICATION_CLASS_CRD = replication.storage.openshift.io_volumereplicationclasses.yaml
+
 OPERATOR_SDK := $(TOOLS_HOST_DIR)/operator-sdk-$(OPERATOR_SDK_VERSION)
 YQ := $(TOOLS_HOST_DIR)/yq-$(YQ_VERSION)
 export OPERATOR_SDK YQ
@@ -59,14 +65,14 @@ do.build:
 	@cp toolbox.sh $(TEMP)
 	@cp set-ceph-debug-level $(TEMP)
 	@cp $(OUTPUT_DIR)/bin/linux_$(GOARCH)/rook $(TEMP)
-	@cp $(OUTPUT_DIR)/bin/linux_$(GOARCH)/rookflex $(TEMP)
-	@cp -r ../../cluster/examples/kubernetes/ceph/csi/template $(TEMP)/ceph-csi
-	@cp -r ../../cluster/examples/kubernetes/ceph/monitoring $(TEMP)/ceph-monitoring
+	@cp -r $(MANIFESTS_DIR)/monitoring $(TEMP)/ceph-monitoring
 	@mkdir -p $(TEMP)/rook-external/test-data
-	@cp ../../cluster/examples/kubernetes/ceph/create-external-cluster-resources.* $(TEMP)/rook-external/
-	@cp ../../cluster/examples/kubernetes/ceph/test-data/ceph-status-out $(TEMP)/rook-external/test-data/
+	@cp $(MANIFESTS_DIR)/create-external-cluster-resources.* $(TEMP)/rook-external/
+	@cp $(MANIFESTS_DIR)/test-data/ceph-status-out $(TEMP)/rook-external/test-data/
+
 ifeq ($(INCLUDE_CSV_TEMPLATES),true)
 	@$(MAKE) CSV_TEMPLATE_DIR=$(TEMP) generate-csv-templates
+	@$(MAKE) CRD_TEMPLATE_DIR=$(TEMP)/cluster/olm/ceph/templates/crds/ get-volume-replication-crds
 	@cp -r $(TEMP)/cluster/olm/ceph/templates $(TEMP)/ceph-csv-templates
 else
 	mkdir $(TEMP)/ceph-csv-templates
@@ -91,7 +97,7 @@ generate-csv-templates: $(OPERATOR_SDK) $(YQ) ## Generate CSV templates for OLM 
 	@mkdir -p $(CSV_TEMPLATE_DIR)
 	@cp -a ../../cluster $(CSV_TEMPLATE_DIR)/cluster
 	@set -eE;\
-	BEFORE_GEN_CRD_SIZE=$$(wc -l < ../../cluster/examples/kubernetes/ceph/crds.yaml);\
+	BEFORE_GEN_CRD_SIZE=$$(wc -l < $(MANIFESTS_DIR)/crds.yaml);\
 	$(MAKE) -C ../.. NO_OB_OBC_VOL_GEN=true MAX_DESC_LEN=0 BUILD_CRDS_INTO_DIR=$(CSV_TEMPLATE_DIR) crds;\
 	AFTER_GEN_CRD_SIZE=$$(wc -l < $(CSV_TEMPLATE_DIR)/cluster/examples/kubernetes/ceph/crds.yaml);\
 	if [ "$$BEFORE_GEN_CRD_SIZE" -le "$$AFTER_GEN_CRD_SIZE" ]; then\
@@ -102,6 +108,15 @@ generate-csv-templates: $(OPERATOR_SDK) $(YQ) ## Generate CSV templates for OLM 
 	fi
 	@OLM_CATALOG_DIR=$(CSV_TEMPLATE_DIR)/cluster/olm/ceph ../../cluster/olm/ceph/generate-rook-csv-templates.sh
 	@echo " === Generated CSV templates can be found at $(CSV_TEMPLATE_DIR)/cluster/olm/ceph/templates"
+
+get-volume-replication-crds:
+	@if [[ -z "$(CRD_TEMPLATE_DIR)" ]]; then echo "CRD_TEMPLATE_DIR is not set"; exit 1; fi
+	@if [[ ! -d "$(CACHE_DIR)/crds" ]]; then\
+		mkdir -p $(CACHE_DIR)/crds;\
+		curl -L $(VOL_REPL_URL)/$(VOLUME_REPLICATION_CRD) -o $(CACHE_DIR)/crds/$(VOLUME_REPLICATION_CRD);\
+		curl -L $(VOL_REPL_URL)/$(VOLUME_REPLICATION_CLASS_CRD) -o $(CACHE_DIR)/crds/$(VOLUME_REPLICATION_CLASS_CRD);\
+	fi
+	@cp $(CACHE_DIR)/crds/* $(CRD_TEMPLATE_DIR)
 
 $(YQ):
 	@echo === installing yq $(GOHOST)
@@ -122,3 +137,16 @@ csv: $(OPERATOR_SDK) $(YQ) ## Generate a CSV file for OLM.
 
 csv-clean: $(OPERATOR_SDK) $(YQ) ## Remove existing OLM files.
 	@rm -fr ../../cluster/olm/ceph/deploy/* ../../cluster/olm/ceph/templates/*
+
+# reading from a file and outputting to the same file can have undefined results, so use this intermediate
+IMAGE_TMP="/tmp/rook-ceph-image-list"
+list-image: ## Create a list of images for offline installation
+	@echo "producing list of images for offline installation"
+	rm -f $(IMAGE_TMP)
+	awk '/image:/ {print $2}' $(MANIFESTS_DIR)/operator.yaml $(MANIFESTS_DIR)/cluster.yaml | \
+		cut -d: -f2- | tee $(IMAGE_TMP)
+	awk '/quay.io/ || /k8s.gcr.io/ {print $3}' ../../pkg/operator/ceph/csi/spec.go | \
+		cut -d= -f2- | tr -d '"' | tee -a $(IMAGE_TMP)
+	rm -f $(MANIFESTS_DIR)/images.txt
+	cat $(IMAGE_TMP) | sort -h | uniq | tee $(MANIFESTS_DIR)/images.txt
+	rm -f $(IMAGE_TMP)

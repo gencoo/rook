@@ -1,5 +1,6 @@
 #################################################################################################################
-# Create an object store with settings for a test environment. Only a single OSD is required in this example.
+# Create an object store with multisite settings for a production environment. A minimum of 3 hosts with OSDs
+# are required in this example.
 #  kubectl create -f object-multisite.yaml
 #################################################################################################################
 apiVersion: ceph.rook.io/v1
@@ -26,12 +27,12 @@ spec:
   metadataPool:
     failureDomain: host
     replicated:
-      size: 1
+      size: 3
       requireSafeReplicaSize: true
   dataPool:
     failureDomain: host
     replicated:
-      size: 1
+      size: 3
       requireSafeReplicaSize: true
     parameters:
       compression_mode: none

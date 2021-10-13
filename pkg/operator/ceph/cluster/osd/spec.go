@@ -347,7 +347,7 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 	volumes := controller.PodVolumes(provisionConfig.DataPathMap, dataDirHostPath, false)
 	failureDomainValue := osdProps.crushHostname
 	doConfigInit := true     // initialize ceph.conf in init container?
-	doBinaryCopyInit := true // copy tini and rook binaries in an init container?
+	doBinaryCopyInit := true // copy rook binary in an init container?
 
 	// This property is used for both PVC and non-PVC use case
 	if osd.CVMode == "" {
@@ -387,10 +387,7 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 	}
 
 	osdID := strconv.Itoa(osd.ID)
-	tiniEnvVar := v1.EnvVar{Name: "TINI_SUBREAPER", Value: ""}
-	envVars := append(c.getConfigEnvVars(osdProps, dataDir), []v1.EnvVar{
-		tiniEnvVar,
-	}...)
+	envVars := c.getConfigEnvVars(osdProps, dataDir)
 	envVars = append(envVars, k8sutil.ClusterDaemonEnvVars(c.spec.CephVersion.Image)...)
 	envVars = append(envVars, []v1.EnvVar{
 		{Name: "ROOK_OSD_UUID", Value: osd.UUID},
@@ -406,7 +403,6 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 		dataDeviceClassEnvVar(osd.DeviceClass),
 	}...)
 	configEnvVars := append(c.getConfigEnvVars(osdProps, dataDir), []v1.EnvVar{
-		tiniEnvVar,
 		{Name: "ROOK_OSD_ID", Value: osdID},
 		{Name: "ROOK_CEPH_VERSION", Value: c.clusterInfo.CephVersion.CephVersionFormatted()},
 		{Name: "ROOK_IS_DEVICE", Value: "true"},
@@ -418,9 +414,9 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 	// If the OSD was prepared with ceph-volume and running on PVC and using the LVM mode
 	if osdProps.onPVC() && osd.CVMode == "lvm" {
 		// if the osd was provisioned by ceph-volume, we need to launch it with rook as the parent process
-		command = []string{path.Join(rookBinariesMountPath, "tini")}
+		command = []string{path.Join(rookBinariesMountPath, "rook")}
 		args = []string{
-			"--", path.Join(rookBinariesMountPath, "rook"),
+			path.Join(rookBinariesMountPath, "rook"),
 			"ceph", "osd", "start",
 			"--",
 			"--foreground",
@@ -715,17 +711,13 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 	}
 
 	if osdProps.onPVC() {
-		// the "all" placement is applied separately so it will have lower priority.
-		// We want placement from the storageClassDeviceSet to be applied and override
-		// the "all" placement if there are any overlapping placement settings.
-		c.spec.Placement.All().ApplyToPodSpec(&deployment.Spec.Template.Spec)
-		// apply storageClassDeviceSet Placement
-		// If nodeAffinity is specified both in the device set and "all" placement,
-		// they will be merged.
+		c.applyAllPlacementIfNeeded(&deployment.Spec.Template.Spec)
+		// apply storageClassDeviceSets.Placement
 		osdProps.placement.ApplyToPodSpec(&deployment.Spec.Template.Spec)
 	} else {
-		p := cephv1.GetOSDPlacement(c.spec.Placement)
-		p.ApplyToPodSpec(&deployment.Spec.Template.Spec)
+		c.applyAllPlacementIfNeeded(&deployment.Spec.Template.Spec)
+		// apply c.spec.Placement.osd
+		c.spec.Placement[cephv1.KeyOSD].ApplyToPodSpec(&deployment.Spec.Template.Spec)
 	}
 
 	// portable OSDs must have affinity to the topology where the osd prepare job was executed
@@ -745,6 +737,22 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 	return deployment, nil
 }
 
+// applyAllPlacementIfNeeded apply spec.placement.all if OnlyApplyOSDPlacement set to false
+func (c *Cluster) applyAllPlacementIfNeeded(d *v1.PodSpec) {
+	// The placement for OSDs is computed from several different places:
+	// - For non-PVCs: `placement.all` and `placement.osd`
+	// - For PVCs: `placement.all` and inside the storageClassDeviceSet from the `placement` or `preparePlacement`
+
+	// The placement from these sources will be merged by default (if onlyApplyOSDPlacement is false) in case of NodeAffinity and toleration,
+	// in case of other placement rule like PodAffinity, PodAntiAffinity... it will override last placement with the current placement applied,
+	// See ApplyToPodSpec().
+
+	// apply spec.placement.all when spec.Storage.OnlyApplyOSDPlacement is false
+	if !c.spec.Storage.OnlyApplyOSDPlacement {
+		c.spec.Placement.All().ApplyToPodSpec(d)
+	}
+}
+
 func applyTopologyAffinity(spec *v1.PodSpec, osd OSDInfo) error {
 	if osd.TopologyAffinity == "" {
 		logger.Debugf("no topology affinity to set for osd %d", osd.ID)
@@ -762,8 +770,8 @@ func applyTopologyAffinity(spec *v1.PodSpec, osd OSDInfo) error {
 	return nil
 }
 
-// To get rook inside the container, the config init container needs to copy "tini" and "rook" binaries into a volume.
-// Get the config flag so rook will copy the binaries and create the volume and mount that will be shared between
+// To get rook inside the container, the config init container needs to copy "rook" binary into a volume.
+// Get the config flag so rook will copy the binary and create the volume and mount that will be shared between
 // the init container and the daemon container
 func (c *Cluster) getCopyBinariesContainer() (v1.Volume, *v1.Container) {
 	volume := v1.Volume{Name: rookBinariesVolumeName, VolumeSource: v1.VolumeSource{EmptyDir: &v1.EmptyDirVolumeSource{}}}

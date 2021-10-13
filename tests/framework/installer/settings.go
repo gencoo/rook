@@ -21,11 +21,14 @@ import (
 	"io/ioutil"
 	"net/http"
 	"path"
+	"regexp"
 	"time"
 
 	"github.com/pkg/errors"
 	"github.com/rook/rook/tests/framework/utils"
 )
+
+var imageMatch = regexp.MustCompile(`image: rook\/ceph:[a-z0-9.-]+`)
 
 func readManifest(provider, filename string) string {
 	rootDir, err := utils.FindRookRoot()
@@ -38,11 +41,15 @@ func readManifest(provider, filename string) string {
 	if err != nil {
 		panic(errors.Wrapf(err, "failed to read manifest at %s", manifest))
 	}
-	return string(contents)
+	return imageMatch.ReplaceAllString(string(contents), "image: rook/ceph:"+LocalBuildTag)
 }
 
 func readManifestFromGithub(rookVersion, provider, filename string) string {
 	url := fmt.Sprintf("https://raw.githubusercontent.com/rook/rook/%s/cluster/examples/kubernetes/%s/%s", rookVersion, provider, filename)
+	return readManifestFromURL(url)
+}
+
+func readManifestFromURL(url string) string {
 	logger.Infof("Retrieving manifest: %s", url)
 	var response *http.Response
 	var err error

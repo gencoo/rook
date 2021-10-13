@@ -1,6 +1,8 @@
 name: Integration test CephMgrSuite
 on:
   pull_request:
+  schedule:
+    - cron: "0 0 * * *" # every day at midnight
 
 defaults:
   run:
@@ -10,11 +12,11 @@ defaults:
 jobs:
   TestCephMgrSuite:
     runs-on: ubuntu-18.04
-    if: "!contains(github.event.pull_request.labels.*.name, 'skip-ci')"
+    if: "contains(github.event.pull_request.labels.*.name, 'run-mgr-suite')"
     strategy:
       fail-fast: false
       matrix:
-        kubernetes-versions : ['v1.21.0']
+        kubernetes-versions : ['v1.22.2']
     steps:
     - name: checkout
       uses: actions/checkout@v2
@@ -29,7 +31,7 @@ jobs:
     - name: setup minikube
       uses: manusa/actions-setup-minikube@v2.4.2
       with:
-        minikube version: 'v1.21.0'
+        minikube version: 'v1.22.0'
         kubernetes version: ${{ matrix.kubernetes-versions }}
         start args: --memory 6g --cpus=2
         github token: ${{ secrets.GITHUB_TOKEN }}
@@ -46,7 +48,7 @@ jobs:
     - name: TestCephMgrSuite
       run: |
        export DEVICE_FILTER=$(lsblk|awk '/14G/ {print $1}'| head -1)
-       go test -v -timeout 1800s -run CephMgrSuite github.com/rook/rook/tests/integration
+       go test -v -timeout 1800s -failfast -run CephMgrSuite github.com/rook/rook/tests/integration
 
     - name: Artifact
       uses: actions/upload-artifact@v2
@@ -55,7 +57,7 @@ jobs:
         name: ceph-mgr-suite-artifact
         path: /home/runner/work/rook/rook/tests/integration/_output/tests/
 
-    - name: setup tmate session for debugging
-      if: failure()
+    - name: setup tmate session for debugging when event is PR
+      if: failure() && github.event_name == 'pull_request'
       uses: mxschmitt/action-tmate@v3
-      timeout-minutes: 120
+      timeout-minutes: 60

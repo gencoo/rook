@@ -17,8 +17,6 @@ limitations under the License.
 package pool
 
 import (
-	"context"
-
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
@@ -39,7 +37,7 @@ func (r *ReconcileCephBlockPool) reconcileAddBoostrapPeer(pool *cephv1.CephBlock
 	// For each, get the Kubernetes Secret and import the "peer token" so that we can configure the mirroring
 	for _, peerSecret := range pool.Spec.Mirroring.Peers.SecretNames {
 		logger.Debugf("fetching bootstrap peer kubernetes secret %q", peerSecret)
-		s, err := r.context.Clientset.CoreV1().Secrets(r.clusterInfo.Namespace).Get(context.TODO(), peerSecret, metav1.GetOptions{})
+		s, err := r.context.Clientset.CoreV1().Secrets(r.clusterInfo.Namespace).Get(r.opManagerContext, peerSecret, metav1.GetOptions{})
 		// We don't care about IsNotFound here, we still need to fail
 		if err != nil {
 			return opcontroller.ImmediateRetryResult, errors.Wrapf(err, "failed to fetch kubernetes secret %q bootstrap peer", peerSecret)
@@ -52,7 +50,7 @@ func (r *ReconcileCephBlockPool) reconcileAddBoostrapPeer(pool *cephv1.CephBlock
 		}
 
 		// Import bootstrap peer
-		err = client.ImportRBDMirrorBootstrapPeer(r.context, r.clusterInfo, string(s.Data["pool"]), string(s.Data["direction"]), s.Data["token"])
+		err = client.ImportRBDMirrorBootstrapPeer(r.context, r.clusterInfo, pool.Name, string(s.Data["direction"]), s.Data["token"])
 		if err != nil {
 			return opcontroller.ImmediateRetryResult, errors.Wrap(err, "failed to import bootstrap peer token")
 		}

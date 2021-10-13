@@ -84,10 +84,9 @@ func (s *MultiClusterDeploySuite) SetupSuite() {
 		StorageClassName:          "manual",
 		UsePVC:                    installer.UsePVC(),
 		Mons:                      1,
-		UseCSI:                    true,
 		MultipleMgrs:              true,
 		EnableAdmissionController: true,
-		RookVersion:               installer.VersionMaster,
+		RookVersion:               installer.LocalBuildTag,
 		CephVersion:               installer.NautilusVersion,
 	}
 	s.settings.ApplyEnvVars()
@@ -97,7 +96,6 @@ func (s *MultiClusterDeploySuite) SetupSuite() {
 		Namespace:         "multi-external",
 		OperatorNamespace: s.settings.OperatorNamespace,
 		RookVersion:       s.settings.RookVersion,
-		UseCSI:            true,
 	}
 	externalSettings.ApplyEnvVars()
 	s.externalManifests = installer.NewCephManifests(externalSettings)
@@ -167,7 +165,7 @@ func (s *MultiClusterDeploySuite) setupMultiClusterCore() {
 	cmdOut := utils.ExecuteCommand(cmdArgs)
 	require.NoError(s.T(), cmdOut.Err)
 
-	s.installer, s.k8sh = StartTestCluster(s.T, s.settings, multiClusterMinimalTestVersion)
+	s.installer, s.k8sh = StartTestCluster(s.T, s.settings)
 	s.testClient = clients.CreateTestClient(s.k8sh, s.installer.Manifests)
 	s.coreToolbox = client.RunAllCephCommandsInToolboxPod
 }

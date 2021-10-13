@@ -13,7 +13,7 @@ crds:
   # managed independently with cluster/examples/kubernetes/ceph/crds.yaml.
   # **WARNING** Only set during first deployment. If later disabled the cluster may be DESTROYED.
   # If the CRDs are deleted in this case, see the disaster recovery guide to restore them.
-  # https://rook.github.io/docs/rook/master/ceph-disaster-recovery.html#restoring-crds-after-deletion
+  # https://rook.github.io/docs/rook/latest/ceph-disaster-recovery.html#restoring-crds-after-deletion
   enabled: true
 
 resources:
@@ -41,7 +41,7 @@ currentNamespaceOnly: false
 ## Annotations to be added to pod
 annotations: {}
 
-## LogLevel can be set to: TRACE, DEBUG, INFO, NOTICE, WARNING, ERROR or CRITICAL
+## The logging level for the operator: ERROR | WARNING | INFO | DEBUG
 logLevel: INFO
 
 ## If true, create & use RBAC resources
@@ -78,7 +78,7 @@ csi:
 
   # (Optional) policy for modifying a volume's ownership or permissions when the CephFS PVC is being mounted.
   # supported values are documented at https://kubernetes-csi.github.io/docs/support-fsgroup.html
-  cephFSFSGroupPolicy: "ReadWriteOnceWithFSType"
+  cephFSFSGroupPolicy: "None"
 
   # OMAP generator generates the omap mapping between the PV name and the RBD image
   # which helps CSI to identify the rbd images for CSI operations.
@@ -86,6 +86,9 @@ csi:
   # By default OMAP generator is disabled and when enabled it will be deployed as a
   # sidecar with CSI provisioner pod, to enable set it to true.
   enableOMAPGenerator: false
+
+  # Set replicas for csi provisioner deployment.
+  provisionerReplicas: 2
 
   # Set logging level for csi containers.
   # Supported values from 0 to 5. 0 for general useful logs, 5 for trace level verbosity.
@@ -270,7 +273,7 @@ csi:
   #rbdLivenessMetricsPort: 9080
   #kubeletDirPath: /var/lib/kubelet
   #cephcsi:
-    #image: quay.io/cephcsi/cephcsi:v3.3.1
+    #image: quay.io/cephcsi/cephcsi:v3.4.0
   #registrar:
     #image: k8s.gcr.io/sig-storage/csi-node-driver-registrar:v2.2.0
   #provisioner:
@@ -285,12 +288,13 @@ csi:
   #cephfsPodLabels: "key1=value1,key2=value2"
   # Labels to add to the CSI RBD Deployments and DaemonSets Pods.
   #rbdPodLabels: "key1=value1,key2=value2"
-  # Enable volume replication controller
+  # Enable the volume replication controller.
+  # Before enabling, ensure the Volume Replication CRDs are created.
+  # See https://rook.io/docs/rook/latest/ceph-csi-drivers.html#rbd-mirroring
   volumeReplication:
     enabled: false
     #image: "quay.io/csiaddons/volumereplication-operator:v0.1.0"
 
-enableFlexDriver: false
 enableDiscoveryDaemon: false
 cephCommandsTimeoutSeconds: "15"
 
@@ -301,27 +305,6 @@ allowMultipleFilesystems: false
 
 ## if true, run rook operator on the host network
 # useOperatorHostNetwork: true
-
-## Rook Agent configuration
-## toleration: NoSchedule, PreferNoSchedule or NoExecute
-## tolerationKey: Set this to the specific key of the taint to tolerate
-## tolerations: Array of tolerations in YAML format which will be added to agent deployment
-## nodeAffinity: Set to labels of the node to match
-## flexVolumeDirPath: The path where the Rook agent discovers the flex volume plugins
-## libModulesDirPath: The path where the Rook agent can find kernel modules
-# agent:
-#   toleration: NoSchedule
-#   tolerationKey: key
-#   tolerations:
-#   - key: key
-#     operator: Exists
-#     effect: NoSchedule
-#   nodeAffinity: key1=value1,value2; key2=value3
-#   mountSecurityMode: Any
-## For information on FlexVolume path, please refer to https://rook.io/docs/rook/master/flexvolume.html
-#   flexVolumeDirPath: /usr/libexec/kubernetes/kubelet-plugins/volume/exec/
-#   libModulesDirPath: /lib/modules
-#   mounts: mount1=/host/path:/container/path,/host/path2:/container/path2
 
 ## Rook Discover configuration
 ## toleration: NoSchedule, PreferNoSchedule or NoExecute

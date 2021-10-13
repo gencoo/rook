@@ -23,7 +23,6 @@ import (
 
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	"github.com/rook/rook/pkg/apis/rook.io"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
 	clienttest "github.com/rook/rook/pkg/daemon/ceph/client/test"
@@ -185,10 +184,28 @@ func TestSSLPodSpec(t *testing.T) {
 		"my-priority-class")
 	// Using service serving cert
 	c.store.Spec.Gateway.SSLCertificateRef = ""
-	c.store.Spec.Gateway.Service = &(cephv1.RGWServiceSpec{Annotations: rook.Annotations{cephv1.ServiceServingCertKey: "rgw-cert"}})
+	c.store.Spec.Gateway.Service = &(cephv1.RGWServiceSpec{Annotations: cephv1.Annotations{cephv1.ServiceServingCertKey: "rgw-cert"}})
 	secretVolSrc, err = c.generateVolumeSourceWithTLSSecret()
 	assert.NoError(t, err)
 	assert.Equal(t, secretVolSrc.SecretName, "rgw-cert")
+	// Using caBundleRef
+	// Opaque Secret
+	c.store.Spec.Gateway.CaBundleRef = "mycabundle"
+	cabundlesecret := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      c.store.Spec.Gateway.CaBundleRef,
+			Namespace: c.store.Namespace,
+		},
+		Data: map[string][]byte{
+			"cabundle": []byte("cabundletesting"),
+		},
+		Type: v1.SecretTypeOpaque,
+	}
+	_, err = c.context.Clientset.CoreV1().Secrets(store.Namespace).Create(ctx, cabundlesecret, metav1.CreateOptions{})
+	assert.NoError(t, err)
+	caBundleVolSrc, err := c.generateVolumeSourceWithCaBundleSecret()
+	assert.NoError(t, err)
+	assert.Equal(t, caBundleVolSrc.SecretName, "mycabundle")
 	s, err = c.makeRGWPodSpec(rgwConfig)
 	assert.NoError(t, err)
 	podTemplate = cephtest.NewPodTemplateSpecTester(t, &s)
@@ -361,4 +378,34 @@ func TestCheckRGWKMS(t *testing.T) {
 	b, err = c.CheckRGWKMS()
 	assert.True(t, b)
 	assert.NoError(t, err)
+}
+
+func TestGetDaemonName(t *testing.T) {
+	context := &clusterd.Context{Clientset: test.New(t, 3)}
+	store := simpleStore()
+	tests := []struct {
+		storeName      string
+		testDaemonName string
+		daemonID       string
+	}{
+		{"default", "ceph-client.rgw.default.a", "a"},
+		{"my-store", "ceph-client.rgw.my.store.b", "b"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.storeName, func(t *testing.T) {
+			c := &clusterConfig{
+				context: context,
+				store:   store,
+			}
+			c.store.Name = tt.storeName
+			daemonName := fmt.Sprintf("%s-%s", c.store.Name, tt.daemonID)
+			resourceName := fmt.Sprintf("%s-%s", AppName, daemonName)
+			rgwconfig := &rgwConfig{
+				ResourceName: resourceName,
+				DaemonID:     daemonName,
+			}
+			daemon := getDaemonName(rgwconfig)
+			assert.Equal(t, tt.testDaemonName, daemon)
+		})
+	}
 }

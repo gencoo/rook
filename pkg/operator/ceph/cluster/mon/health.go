@@ -19,10 +19,12 @@ package mon
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/pkg/errors"
+	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	cephutil "github.com/rook/rook/pkg/daemon/ceph/util"
 	"github.com/rook/rook/pkg/operator/ceph/controller"
@@ -51,24 +53,50 @@ type HealthChecker struct {
 }
 
 func updateMonTimeout(monCluster *Cluster) {
-	monCRDTimeoutSetting := monCluster.spec.HealthCheck.DaemonHealth.Monitor.Timeout
-	if monCRDTimeoutSetting != "" {
-		if monTimeout, err := time.ParseDuration(monCRDTimeoutSetting); err == nil {
-			if monTimeout == timeZero {
-				logger.Warning("monitor failover is disabled")
+	// If the env was passed by the operator config, use that value
+	// This is an old behavior where we maintain backward compatibility
+	monTimeoutEnv := os.Getenv("ROOK_MON_OUT_TIMEOUT")
+	if monTimeoutEnv != "" {
+		parsedInterval, err := time.ParseDuration(monTimeoutEnv)
+		// We ignore the error here since the default is 10min and it's unlikely to be a problem
+		if err == nil {
+			MonOutTimeout = parsedInterval
+		}
+		// No env var, let's use the CR value if any
+	} else {
+		monCRDTimeoutSetting := monCluster.spec.HealthCheck.DaemonHealth.Monitor.Timeout
+		if monCRDTimeoutSetting != "" {
+			if monTimeout, err := time.ParseDuration(monCRDTimeoutSetting); err == nil {
+				if monTimeout == timeZero {
+					logger.Warning("monitor failover is disabled")
+				}
+				MonOutTimeout = monTimeout
 			}
-			MonOutTimeout = monTimeout
 		}
 	}
+	// A third case is when the CRD is not set, in which case we use the default from MonOutTimeout
 }
 
 func updateMonInterval(monCluster *Cluster, h *HealthChecker) {
-	checkInterval := monCluster.spec.HealthCheck.DaemonHealth.Monitor.Interval
-	// allow overriding the check interval
-	if checkInterval != nil {
-		logger.Debugf("ceph mon status in namespace %q check interval %q", monCluster.Namespace, checkInterval.Duration.String())
-		h.interval = checkInterval.Duration
+	// If the env was passed by the operator config, use that value
+	// This is an old behavior where we maintain backward compatibility
+	healthCheckIntervalEnv := os.Getenv("ROOK_MON_HEALTHCHECK_INTERVAL")
+	if healthCheckIntervalEnv != "" {
+		parsedInterval, err := time.ParseDuration(healthCheckIntervalEnv)
+		// We ignore the error here since the default is 45s and it's unlikely to be a problem
+		if err == nil {
+			h.interval = parsedInterval
+		}
+		// No env var, let's use the CR value if any
+	} else {
+		checkInterval := monCluster.spec.HealthCheck.DaemonHealth.Monitor.Interval
+		// allow overriding the check interval
+		if checkInterval != nil {
+			logger.Debugf("ceph mon status in namespace %q check interval %q", monCluster.Namespace, checkInterval.Duration.String())
+			h.interval = checkInterval.Duration
+		}
 	}
+	// A third case is when the CRD is not set, in which case we use the default from HealthCheckInterval
 }
 
 // NewHealthChecker creates a new HealthChecker object
@@ -81,14 +109,14 @@ func NewHealthChecker(monCluster *Cluster) *HealthChecker {
 }
 
 // Check periodically checks the health of the monitors
-func (hc *HealthChecker) Check(stopCh chan struct{}) {
+func (hc *HealthChecker) Check(context context.Context) {
 	for {
 		// Update Mon Timeout with CR details
 		updateMonTimeout(hc.monCluster)
 		// Update Mon Interval with CR details
 		updateMonInterval(hc.monCluster, hc)
 		select {
-		case <-stopCh:
+		case <-context.Done():
 			logger.Infof("stopping monitoring of mons in namespace %q", hc.monCluster.Namespace)
 			return
 
@@ -234,7 +262,10 @@ func (c *Cluster) checkHealth() error {
 		retriesBeforeNodeDrainFailover = 1
 
 		logger.Warningf("mon %q NOT found in quorum and timeout exceeded, mon will be failed over", mon.Name)
-		c.failMon(len(quorumStatus.MonMap.Mons), desiredMonCount, mon.Name)
+		if !c.failMon(len(quorumStatus.MonMap.Mons), desiredMonCount, mon.Name) {
+			// The failover was skipped, so we continue to see if another mon needs to failover
+			continue
+		}
 
 		// only deal with one unhealthy mon per health check
 		return nil
@@ -283,13 +314,24 @@ func (c *Cluster) checkHealth() error {
 }
 
 // failMon compares the monCount against desiredMonCount
-func (c *Cluster) failMon(monCount, desiredMonCount int, name string) {
+// Returns whether the failover request was attempted. If false,
+// the operator should check for other mons to failover.
+func (c *Cluster) failMon(monCount, desiredMonCount int, name string) bool {
 	if monCount > desiredMonCount {
 		// no need to create a new mon since we have an extra
 		if err := c.removeMon(name); err != nil {
 			logger.Errorf("failed to remove mon %q. %v", name, err)
 		}
 	} else {
+		if c.spec.IsStretchCluster() && name == c.arbiterMon {
+			// Ceph does not currently support updating the arbiter mon
+			// or else the mons in the two datacenters will not be aware anymore
+			// of the arbiter mon. Thus, disabling failover until the arbiter
+			// mon can be updated in ceph.
+			logger.Warningf("refusing to failover arbiter mon %q on a stretched cluster", name)
+			return false
+		}
+
 		// prevent any voluntary mon drain while failing over
 		if err := c.blockMonDrain(types.NamespacedName{Name: monPDBName, Namespace: c.Namespace}); err != nil {
 			logger.Errorf("failed to block mon drain. %v", err)
@@ -305,10 +347,10 @@ func (c *Cluster) failMon(monCount, desiredMonCount int, name string) {
 			logger.Errorf("failed to allow mon drain. %v", err)
 		}
 	}
+	return true
 }
 
 func (c *Cluster) removeOrphanMonResources() {
-	ctx := context.TODO()
 	if c.spec.Mon.VolumeClaimTemplate == nil {
 		logger.Debug("skipping check for orphaned mon pvcs since using the host path")
 		return
@@ -317,7 +359,7 @@ func (c *Cluster) removeOrphanMonResources() {
 	logger.Info("checking for orphaned mon resources")
 
 	opts := metav1.ListOptions{LabelSelector: fmt.Sprintf("%s=%s", k8sutil.AppAttr, AppName)}
-	pvcs, err := c.context.Clientset.CoreV1().PersistentVolumeClaims(c.Namespace).List(ctx, opts)
+	pvcs, err := c.context.Clientset.CoreV1().PersistentVolumeClaims(c.Namespace).List(c.ClusterInfo.Context, opts)
 	if err != nil {
 		logger.Infof("failed to check for orphaned mon pvcs. %v", err)
 		return
@@ -326,7 +368,7 @@ func (c *Cluster) removeOrphanMonResources() {
 	for _, pvc := range pvcs.Items {
 		logger.Debugf("checking if pvc %q is orphaned", pvc.Name)
 
-		_, err := c.context.Clientset.AppsV1().Deployments(c.Namespace).Get(ctx, pvc.Name, metav1.GetOptions{})
+		_, err := c.context.Clientset.AppsV1().Deployments(c.Namespace).Get(c.ClusterInfo.Context, pvc.Name, metav1.GetOptions{})
 		if err == nil {
 			logger.Debugf("skipping pvc removal since the mon daemon %q still requires it", pvc.Name)
 			continue
@@ -340,7 +382,7 @@ func (c *Cluster) removeOrphanMonResources() {
 		var gracePeriod int64 // delete immediately
 		propagation := metav1.DeletePropagationForeground
 		options := &metav1.DeleteOptions{GracePeriodSeconds: &gracePeriod, PropagationPolicy: &propagation}
-		err = c.context.Clientset.CoreV1().PersistentVolumeClaims(c.Namespace).Delete(ctx, pvc.Name, *options)
+		err = c.context.Clientset.CoreV1().PersistentVolumeClaims(c.Namespace).Delete(c.ClusterInfo.Context, pvc.Name, *options)
 		if err != nil {
 			logger.Warningf("failed to delete orphaned monitor pvc %q. %v", pvc.Name, err)
 		}
@@ -348,9 +390,8 @@ func (c *Cluster) removeOrphanMonResources() {
 }
 
 func (c *Cluster) updateMonDeploymentReplica(name string, enabled bool) error {
-	ctx := context.TODO()
 	// get the existing deployment
-	d, err := c.context.Clientset.AppsV1().Deployments(c.Namespace).Get(ctx, resourceName(name), metav1.GetOptions{})
+	d, err := c.context.Clientset.AppsV1().Deployments(c.Namespace).Get(c.ClusterInfo.Context, resourceName(name), metav1.GetOptions{})
 	if err != nil {
 		return errors.Wrapf(err, "failed to get mon %q", name)
 	}
@@ -365,7 +406,7 @@ func (c *Cluster) updateMonDeploymentReplica(name string, enabled bool) error {
 
 	// update the deployment
 	logger.Infof("scaling the mon %q deployment to replica %d", name, desiredReplicas)
-	_, err = c.context.Clientset.AppsV1().Deployments(c.Namespace).Update(ctx, d, metav1.UpdateOptions{})
+	_, err = c.context.Clientset.AppsV1().Deployments(c.Namespace).Update(c.ClusterInfo.Context, d, metav1.UpdateOptions{})
 	if err != nil {
 		return errors.Wrapf(err, "failed to update mon %q replicas from %d to %d", name, originalReplicas, desiredReplicas)
 	}
@@ -450,7 +491,6 @@ func (c *Cluster) failoverMon(name string) error {
 
 // make a best effort to remove the mon and all its resources
 func (c *Cluster) removeMon(daemonName string) error {
-	ctx := context.TODO()
 	logger.Infof("ensuring removal of unhealthy monitor %s", daemonName)
 
 	resourceName := resourceName(daemonName)
@@ -459,7 +499,7 @@ func (c *Cluster) removeMon(daemonName string) error {
 	var gracePeriod int64
 	propagation := metav1.DeletePropagationForeground
 	options := &metav1.DeleteOptions{GracePeriodSeconds: &gracePeriod, PropagationPolicy: &propagation}
-	if err := c.context.Clientset.AppsV1().Deployments(c.Namespace).Delete(ctx, resourceName, *options); err != nil {
+	if err := c.context.Clientset.AppsV1().Deployments(c.Namespace).Delete(c.ClusterInfo.Context, resourceName, *options); err != nil {
 		if kerrors.IsNotFound(err) {
 			logger.Infof("dead mon %s was already gone", resourceName)
 		} else {
@@ -476,7 +516,7 @@ func (c *Cluster) removeMon(daemonName string) error {
 	delete(c.mapping.Schedule, daemonName)
 
 	// Remove the service endpoint
-	if err := c.context.Clientset.CoreV1().Services(c.Namespace).Delete(ctx, resourceName, *options); err != nil {
+	if err := c.context.Clientset.CoreV1().Services(c.Namespace).Delete(c.ClusterInfo.Context, resourceName, *options); err != nil {
 		if kerrors.IsNotFound(err) {
 			logger.Infof("dead mon service %s was already gone", resourceName)
 		} else {
@@ -485,7 +525,7 @@ func (c *Cluster) removeMon(daemonName string) error {
 	}
 
 	// Remove the PVC backing the mon if it existed
-	if err := c.context.Clientset.CoreV1().PersistentVolumeClaims(c.Namespace).Delete(ctx, resourceName, metav1.DeleteOptions{}); err != nil {
+	if err := c.context.Clientset.CoreV1().PersistentVolumeClaims(c.Namespace).Delete(c.ClusterInfo.Context, resourceName, metav1.DeleteOptions{}); err != nil {
 		if kerrors.IsNotFound(err) {
 			logger.Infof("mon pvc did not exist %q", resourceName)
 		} else {
@@ -495,6 +535,12 @@ func (c *Cluster) removeMon(daemonName string) error {
 
 	if err := c.saveMonConfig(); err != nil {
 		return errors.Wrapf(err, "failed to save mon config after failing over mon %s", daemonName)
+	}
+
+	// Update cluster-wide RBD bootstrap peer token since Monitors have changed
+	_, err := controller.CreateBootstrapPeerSecret(c.context, c.ClusterInfo, &cephv1.CephCluster{ObjectMeta: metav1.ObjectMeta{Name: c.ClusterInfo.NamespacedName().Name, Namespace: c.Namespace}}, c.ownerInfo)
+	if err != nil {
+		return errors.Wrap(err, "failed to update cluster rbd bootstrap peer token")
 	}
 
 	return nil
@@ -548,10 +594,6 @@ func (c *Cluster) addOrRemoveExternalMonitor(status cephclient.MonStatusResponse
 	logger.Debugf("ClusterInfo is now Empty, refilling it from status.MonMap.Mons")
 
 	monCount := len(status.MonMap.Mons)
-	if monCount%2 == 0 {
-		logger.Warningf("external cluster mon count is even (%d), should be uneven, continuing.", monCount)
-	}
-
 	if monCount == 1 {
 		logger.Warning("external cluster mon count is 1, consider adding new monitors.")
 	}
@@ -621,7 +663,7 @@ func (c *Cluster) evictMonIfMultipleOnSameNode() error {
 
 	// Get all the mon pods
 	label := fmt.Sprintf("app=%s", AppName)
-	pods, err := c.context.Clientset.CoreV1().Pods(c.Namespace).List(context.TODO(), metav1.ListOptions{LabelSelector: label})
+	pods, err := c.context.Clientset.CoreV1().Pods(c.Namespace).List(c.ClusterInfo.Context, metav1.ListOptions{LabelSelector: label})
 	if err != nil {
 		return errors.Wrap(err, "failed to list mon pods")
 	}

@@ -31,7 +31,6 @@ import (
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mgr"
 	"github.com/rook/rook/pkg/operator/ceph/config"
-	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	"github.com/rook/rook/pkg/util"
 	"github.com/rook/rook/pkg/util/exec"
@@ -39,6 +38,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 const (
@@ -85,6 +85,9 @@ type zoneType struct {
 type realmType struct {
 	Realms []string `json:"realms"`
 }
+
+// allow commitConfigChanges to be overridden for unit testing
+var commitConfigChanges = CommitConfigChanges
 
 func deleteRealmAndPools(objContext *Context, spec cephv1.ObjectStoreSpec) error {
 	if spec.IsMultisite() {
@@ -146,12 +149,11 @@ func removeObjectStoreFromMultisite(objContext *Context, spec cephv1.ObjectStore
 		logger.Infof("WARNING: No other zone in realm %q can commit to the period or pull the realm until you create another object-store in zone %q", objContext.Realm, objContext.Zone)
 	}
 
-	// the period will help notify other zones of changes if there are multi-zones
-	_, err = runAdminCommand(objContext, false, "period", "update", "--commit")
-	if err != nil {
-		return errors.Wrap(err, "failed to update period after removing an endpoint from the zone")
+	// this will notify other zones of changes if there are multi-zones
+	if err := commitConfigChanges(objContext); err != nil {
+		nsName := fmt.Sprintf("%s/%s", objContext.clusterInfo.Namespace, objContext.Name)
+		return errors.Wrapf(err, "failed to commit config changes after removing CephObjectStore %q from multi-site", nsName)
 	}
-	logger.Infof("successfully updated period for realm %v after removal of object-store %v", objContext.Realm, objContext.Name)
 
 	return nil
 }
@@ -362,20 +364,18 @@ func createMultisite(objContext *Context, endpointArg string) error {
 	realmArg := fmt.Sprintf("--rgw-realm=%s", objContext.Realm)
 	zoneGroupArg := fmt.Sprintf("--rgw-zonegroup=%s", objContext.ZoneGroup)
 
-	updatePeriod := false
 	// create the realm if it doesn't exist yet
 	output, err := RunAdminCommandNoMultisite(objContext, true, "realm", "get", realmArg)
 	if err != nil {
 		// ENOENT means “No such file or directory”
 		if code, err := exec.ExtractExitCode(err); err == nil && code == int(syscall.ENOENT) {
-			updatePeriod = true
 			output, err = RunAdminCommandNoMultisite(objContext, false, "realm", "create", realmArg)
 			if err != nil {
 				return errorOrIsNotFound(err, "failed to create ceph realm %q, for reason %q", objContext.ZoneGroup, output)
 			}
-			logger.Debugf("created realm %v", objContext.Realm)
+			logger.Debugf("created realm %q", objContext.Realm)
 		} else {
-			return errorOrIsNotFound(err, "radosgw-admin realm get failed with code %d, for reason %q. %v", strconv.Itoa(code), output, string(kerrors.ReasonForError(err)))
+			return errorOrIsNotFound(err, "'radosgw-admin realm get' failed with code %d, for reason %q. %v", strconv.Itoa(code), output, string(kerrors.ReasonForError(err)))
 		}
 	}
 
@@ -384,14 +384,13 @@ func createMultisite(objContext *Context, endpointArg string) error {
 	if err != nil {
 		// ENOENT means “No such file or directory”
 		if code, err := exec.ExtractExitCode(err); err == nil && code == int(syscall.ENOENT) {
-			updatePeriod = true
 			output, err = RunAdminCommandNoMultisite(objContext, false, "zonegroup", "create", "--master", realmArg, zoneGroupArg, endpointArg)
 			if err != nil {
 				return errorOrIsNotFound(err, "failed to create ceph zone group %q, for reason %q", objContext.ZoneGroup, output)
 			}
-			logger.Debugf("created zone group %v", objContext.ZoneGroup)
+			logger.Debugf("created zone group %q", objContext.ZoneGroup)
 		} else {
-			return errorOrIsNotFound(err, "radosgw-admin zonegroup get failed with code %d, for reason %q", strconv.Itoa(code), output)
+			return errorOrIsNotFound(err, "'radosgw-admin zonegroup get' failed with code %d, for reason %q", strconv.Itoa(code), output)
 		}
 	}
 
@@ -400,24 +399,19 @@ func createMultisite(objContext *Context, endpointArg string) error {
 	if err != nil {
 		// ENOENT means “No such file or directory”
 		if code, err := exec.ExtractExitCode(err); err == nil && code == int(syscall.ENOENT) {
-			updatePeriod = true
 			output, err = runAdminCommand(objContext, false, "zone", "create", "--master", endpointArg)
 			if err != nil {
 				return errorOrIsNotFound(err, "failed to create ceph zone %q, for reason %q", objContext.Zone, output)
 			}
-			logger.Debugf("created zone %v", objContext.Zone)
+			logger.Debugf("created zone %q", objContext.Zone)
 		} else {
-			return errorOrIsNotFound(err, "radosgw-admin zone get failed with code %d, for reason %q", strconv.Itoa(code), output)
+			return errorOrIsNotFound(err, "'radosgw-admin zone get' failed with code %d, for reason %q", strconv.Itoa(code), output)
 		}
 	}
 
-	if updatePeriod {
-		// the period will help notify other zones of changes if there are multi-zones
-		_, err := runAdminCommand(objContext, false, "period", "update", "--commit")
-		if err != nil {
-			return errorOrIsNotFound(err, "failed to update period")
-		}
-		logger.Debugf("updated period for realm %v", objContext.Realm)
+	if err := commitConfigChanges(objContext); err != nil {
+		nsName := fmt.Sprintf("%s/%s", objContext.clusterInfo.Namespace, objContext.Name)
+		return errors.Wrapf(err, "failed to commit config changes after creating multisite config for CephObjectStore %q", nsName)
 	}
 
 	logger.Infof("Multisite for object-store: realm=%s, zonegroup=%s, zone=%s", objContext.Realm, objContext.ZoneGroup, objContext.Zone)
@@ -457,11 +451,11 @@ func joinMultisite(objContext *Context, endpointArg, zoneEndpoints, namespace st
 	}
 	logger.Debugf("endpoints for zone %q are now %q", objContext.Zone, zoneEndpoints)
 
-	// the period will help notify other zones of changes if there are multi-zones
-	_, err = RunAdminCommandNoMultisite(objContext, false, "period", "update", "--commit", realmArg, zoneGroupArg, zoneArg)
-	if err != nil {
-		return errorOrIsNotFound(err, "failed to update period")
+	if err := commitConfigChanges(objContext); err != nil {
+		nsName := fmt.Sprintf("%s/%s", objContext.clusterInfo.Namespace, objContext.Name)
+		return errors.Wrapf(err, "failed to commit config changes for CephObjectStore %q when joining multisite ", nsName)
 	}
+
 	logger.Infof("added object store %q to realm %q, zonegroup %q, zone %q", objContext.Name, objContext.Realm, objContext.ZoneGroup, objContext.Zone)
 
 	// create system user for realm for master zone in master zonegorup for multisite scenario
@@ -685,14 +679,14 @@ func missingPools(context *Context) ([]string, error) {
 	if err != nil {
 		return []string{}, errors.Wrapf(err, "failed to determine if pools are missing. failed to list pools")
 	}
-	existingPools := util.NewSet()
+	existingPools := sets.NewString()
 	for _, summary := range existingPoolSummaries {
-		existingPools.Add(summary.Name)
+		existingPools.Insert(summary.Name)
 	}
 
 	missingPools := []string{}
 	for _, objPool := range allObjectPools(context.Name) {
-		if !existingPools.Contains(objPool) {
+		if !existingPools.Has(objPool) {
 			missingPools = append(missingPools, objPool)
 		}
 	}
@@ -821,15 +815,11 @@ func poolName(storeName, poolName string) string {
 }
 
 // GetObjectBucketProvisioner returns the bucket provisioner name appended with operator namespace if OBC is watching on it
-func GetObjectBucketProvisioner(c *clusterd.Context, namespace string) string {
+func GetObjectBucketProvisioner(data map[string]string, namespace string) string {
 	provName := bucketProvisionerName
-	obcWatchOnNamespace, err := k8sutil.GetOperatorSetting(c.Clientset, opcontroller.OperatorSettingConfigMapName, "ROOK_OBC_WATCH_OPERATOR_NAMESPACE", "false")
-	if err != nil {
-		logger.Warning("failed to verify if obc should watch the operator namespace or all of them, watching all")
-	} else {
-		if strings.EqualFold(obcWatchOnNamespace, "true") {
-			provName = fmt.Sprintf("%s.%s", namespace, bucketProvisionerName)
-		}
+	obcWatchOnNamespace := k8sutil.GetValue(data, "ROOK_OBC_WATCH_OPERATOR_NAMESPACE", "false")
+	if strings.EqualFold(obcWatchOnNamespace, "true") {
+		provName = fmt.Sprintf("%s.%s", namespace, bucketProvisionerName)
 	}
 	return provName
 }
@@ -865,7 +855,10 @@ func enableRGWDashboard(context *Context) error {
 	}
 	// TODO:
 	// Use admin ops user instead!
-	u, errCode, err := CreateUser(context, user)
+	// It's safe to create the user with the force flag regardless if the cluster's dashboard is
+	// configured as a secondary rgw site. The creation will return the user already exists and we
+	// will just fetch it (it has been created by the primary cluster)
+	u, errCode, err := CreateUser(context, user, true)
 	if err != nil || errCode != 0 {
 		return errors.Wrapf(err, "failed to create user %q", DashboardUser)
 	}
@@ -875,7 +868,7 @@ func enableRGWDashboard(context *Context) error {
 
 	// for latest Ceph versions
 	if mgr.FileBasedPasswordSupported(context.clusterInfo) {
-		accessFile, err := mgr.CreateTempPasswordFile(*u.AccessKey)
+		accessFile, err := util.CreateTempFile(*u.AccessKey)
 		if err != nil {
 			return errors.Wrap(err, "failed to create a temporary dashboard access-key file")
 		}
@@ -887,7 +880,7 @@ func enableRGWDashboard(context *Context) error {
 			}
 		}()
 
-		secretFile, err = mgr.CreateTempPasswordFile(*u.SecretKey)
+		secretFile, err = util.CreateTempFile(*u.SecretKey)
 		if err != nil {
 			return errors.Wrap(err, "failed to create a temporary dashboard secret-key file")
 		}

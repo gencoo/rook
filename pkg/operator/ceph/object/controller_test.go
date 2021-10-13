@@ -19,17 +19,23 @@ package object
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/coreos/pkg/capnslog"
+	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	rookclient "github.com/rook/rook/pkg/client/clientset/versioned/fake"
+	rookfake "github.com/rook/rook/pkg/client/clientset/versioned/fake"
 	"github.com/rook/rook/pkg/client/clientset/versioned/scheme"
 	"github.com/rook/rook/pkg/clusterd"
+	"github.com/rook/rook/pkg/daemon/ceph/client"
+	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	"github.com/rook/rook/pkg/operator/test"
+	"github.com/rook/rook/pkg/util/dependents"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
@@ -281,59 +287,73 @@ func TestCephObjectStoreController(t *testing.T) {
 	capnslog.SetGlobalLogLevel(capnslog.DEBUG)
 	os.Setenv("ROOK_LOG_LEVEL", "DEBUG")
 
-	//
-	// TEST 1 SETUP
-	//
-	// FAILURE because no CephCluster
-	//
-	// A Pool resource with metadata and spec.
-	objectStore := &cephv1.CephObjectStore{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      store,
-			Namespace: namespace,
-		},
-		Spec:     cephv1.ObjectStoreSpec{},
-		TypeMeta: controllerTypeMeta,
-	}
-	objectStore.Spec.Gateway.Port = 80
+	commitConfigChangesOrig := commitConfigChanges
+	defer func() { commitConfigChanges = commitConfigChangesOrig }()
 
-	// Objects to track in the fake client.
-	object := []runtime.Object{
-		objectStore,
+	// make sure joining multisite calls to commit config changes
+	calledCommitConfigChanges := false
+	commitConfigChanges = func(c *Context) error {
+		calledCommitConfigChanges = true
+		return nil
 	}
 
-	executor := &exectest.MockExecutor{
-		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
-			if args[0] == "status" {
-				return `{"fsid":"c47cac40-9bee-4d52-823b-ccd803ba5bfe","health":{"checks":{},"status":"HEALTH_ERR"},"pgmap":{"num_pgs":100,"pgs_by_state":[{"state_name":"active+clean","count":100}]}}`, nil
-			}
-			if args[0] == "versions" {
-				return dummyVersionsRaw, nil
-			}
-			return "", nil
-		},
-	}
-	clientset := test.New(t, 3)
-	c := &clusterd.Context{
-		Executor:      executor,
-		RookClientset: rookclient.NewSimpleClientset(),
-		Clientset:     clientset,
-	}
+	setupNewEnvironment := func(additionalObjects ...runtime.Object) *ReconcileCephObjectStore {
+		// reset var we use to check if we have called to commit config changes
+		calledCommitConfigChanges = false
 
-	// Register operator types with the runtime scheme.
-	s := scheme.Scheme
-	s.AddKnownTypes(cephv1.SchemeGroupVersion, &cephv1.CephObjectStore{})
-	s.AddKnownTypes(cephv1.SchemeGroupVersion, &cephv1.CephCluster{})
+		// A Pool resource with metadata and spec.
+		objectStore := &cephv1.CephObjectStore{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      store,
+				Namespace: namespace,
+			},
+			Spec:     cephv1.ObjectStoreSpec{},
+			TypeMeta: controllerTypeMeta,
+		}
+		objectStore.Spec.Gateway.Port = 80
 
-	// Create a fake client to mock API calls.
-	cl := fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(object...).Build()
-	// Create a ReconcileCephObjectStore object with the scheme and fake client.
-	r := &ReconcileCephObjectStore{
-		client:              cl,
-		scheme:              s,
-		context:             c,
-		objectStoreChannels: make(map[string]*objectStoreHealth),
-		recorder:            k8sutil.NewEventReporter(record.NewFakeRecorder(5)),
+		// Objects to track in the fake client.
+		objects := []runtime.Object{
+			objectStore,
+		}
+
+		for i := range additionalObjects {
+			objects = append(objects, additionalObjects[i])
+		}
+
+		executor := &exectest.MockExecutor{
+			MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
+				if args[0] == "status" {
+					return `{"fsid":"c47cac40-9bee-4d52-823b-ccd803ba5bfe","health":{"checks":{},"status":"HEALTH_ERR"},"pgmap":{"num_pgs":100,"pgs_by_state":[{"state_name":"active+clean","count":100}]}}`, nil
+				}
+				return "", nil
+			},
+		}
+		clientset := test.New(t, 3)
+		c := &clusterd.Context{
+			Executor:      executor,
+			RookClientset: rookclient.NewSimpleClientset(),
+			Clientset:     clientset,
+		}
+
+		// Register operator types with the runtime scheme.
+		s := scheme.Scheme
+		s.AddKnownTypes(cephv1.SchemeGroupVersion, &cephv1.CephObjectStore{})
+		s.AddKnownTypes(cephv1.SchemeGroupVersion, &cephv1.CephCluster{})
+
+		// Create a fake client to mock API calls.
+		cl := fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(objects...).Build()
+		// Create a ReconcileCephObjectStore object with the scheme and fake client.
+		r := &ReconcileCephObjectStore{
+			client:              cl,
+			scheme:              s,
+			context:             c,
+			objectStoreContexts: make(map[string]*objectStoreHealth),
+			recorder:            k8sutil.NewEventReporter(record.NewFakeRecorder(5)),
+			opManagerContext:    context.TODO(),
+		}
+
+		return r
 	}
 
 	// Mock request to simulate Reconcile() being called on an event for a
@@ -344,91 +364,90 @@ func TestCephObjectStoreController(t *testing.T) {
 			Namespace: namespace,
 		},
 	}
-	logger.Info("STARTING PHASE 1")
-	res, err := r.Reconcile(ctx, req)
-	assert.NoError(t, err)
-	assert.True(t, res.Requeue)
-	logger.Info("PHASE 1 DONE")
 
-	//
-	// TEST 2:
-	//
-	// FAILURE we have a cluster but it's not ready
-	//
-	cephCluster := &cephv1.CephCluster{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      namespace,
-			Namespace: namespace,
-		},
-		Status: cephv1.ClusterStatus{
-			Phase: "",
-			CephStatus: &cephv1.CephStatus{
-				Health: "",
+	currentAndDesiredCephVersion = func(rookImage string, namespace string, jobName string, ownerInfo *k8sutil.OwnerInfo, context *clusterd.Context, cephClusterSpec *cephv1.ClusterSpec, clusterInfo *client.ClusterInfo) (*cephver.CephVersion, *cephver.CephVersion, error) {
+		return &cephver.Pacific, &cephver.Pacific, nil
+	}
+
+	t.Run("error - no ceph cluster", func(t *testing.T) {
+		r := setupNewEnvironment()
+
+		res, err := r.Reconcile(ctx, req)
+		assert.NoError(t, err)
+		assert.True(t, res.Requeue)
+		assert.False(t, calledCommitConfigChanges)
+	})
+
+	t.Run("error - ceph cluster not ready", func(t *testing.T) {
+		cephCluster := &cephv1.CephCluster{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      namespace,
+				Namespace: namespace,
 			},
-		},
-	}
-	object = append(object, cephCluster)
-	// Create a fake client to mock API calls.
-	cl = fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(object...).Build()
-	// Create a ReconcileCephObjectStore object with the scheme and fake client.
-	r = &ReconcileCephObjectStore{
-		client:              cl,
-		scheme:              s,
-		context:             c,
-		objectStoreChannels: make(map[string]*objectStoreHealth),
-		recorder:            k8sutil.NewEventReporter(record.NewFakeRecorder(5)),
-	}
-	logger.Info("STARTING PHASE 2")
-	res, err = r.Reconcile(ctx, req)
-	assert.NoError(t, err)
-	assert.True(t, res.Requeue)
-	logger.Info("PHASE 2 DONE")
+			Status: cephv1.ClusterStatus{
+				Phase: "",
+				CephStatus: &cephv1.CephStatus{
+					Health: "",
+				},
+			},
+		}
 
-	//
-	// TEST 3:
-	//
-	// SUCCESS! The CephCluster is ready
-	//
+		r := setupNewEnvironment(cephCluster)
 
-	// Mock clusterInfo
-	secrets := map[string][]byte{
-		"fsid":         []byte(name),
-		"mon-secret":   []byte("monsecret"),
-		"admin-secret": []byte("adminsecret"),
-	}
-	secret := &v1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "rook-ceph-mon",
-			Namespace: namespace,
-		},
-		Data: secrets,
-		Type: k8sutil.RookType,
-	}
-	_, err = c.Clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
-	assert.NoError(t, err)
+		res, err := r.Reconcile(ctx, req)
+		assert.NoError(t, err)
+		assert.True(t, res.Requeue)
+		assert.False(t, calledCommitConfigChanges)
+	})
 
-	// Add ready status to the CephCluster
-	cephCluster.Status.Phase = k8sutil.ReadyStatus
-	cephCluster.Status.CephStatus.Health = "HEALTH_OK"
+	// set up an environment that has a ready ceph cluster, and return the reconciler for it
+	setupEnvironmentWithReadyCephCluster := func() *ReconcileCephObjectStore {
+		cephCluster := &cephv1.CephCluster{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      namespace,
+				Namespace: namespace,
+			},
+			Status: cephv1.ClusterStatus{
+				Phase: k8sutil.ReadyStatus,
+				CephStatus: &cephv1.CephStatus{
+					Health: "HEALTH_OK",
+				},
+			},
+		}
 
-	// Create a fake client to mock API calls.
-	cl = fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(object...).Build()
+		r := setupNewEnvironment(cephCluster)
 
-	// Override executor with the new ceph status and more content
-	executor = &exectest.MockExecutor{
-		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
-			if args[0] == "status" {
-				return `{"fsid":"c47cac40-9bee-4d52-823b-ccd803ba5bfe","health":{"checks":{},"status":"HEALTH_OK"},"pgmap":{"num_pgs":100,"pgs_by_state":[{"state_name":"active+clean","count":100}]}}`, nil
-			}
-			if args[0] == "auth" && args[1] == "get-or-create-key" {
-				return rgwCephAuthGetOrCreateKey, nil
-			}
-			if args[0] == "versions" {
-				return dummyVersionsRaw, nil
-			}
-			if args[0] == "osd" && args[1] == "lspools" {
-				// ceph actually outputs this all on one line, but this parses the same
-				return `[
+		secrets := map[string][]byte{
+			"fsid":         []byte(name),
+			"mon-secret":   []byte("monsecret"),
+			"admin-secret": []byte("adminsecret"),
+		}
+		secret := &v1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "rook-ceph-mon",
+				Namespace: namespace,
+			},
+			Data: secrets,
+			Type: k8sutil.RookType,
+		}
+		_, err := r.context.Clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
+		assert.NoError(t, err)
+
+		// Override executor with the new ceph status and more content
+		executor := &exectest.MockExecutor{
+			MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
+				if args[0] == "status" {
+					return `{"fsid":"c47cac40-9bee-4d52-823b-ccd803ba5bfe","health":{"checks":{},"status":"HEALTH_OK"},"pgmap":{"num_pgs":100,"pgs_by_state":[{"state_name":"active+clean","count":100}]}}`, nil
+				}
+				if args[0] == "auth" && args[1] == "get-or-create-key" {
+					return rgwCephAuthGetOrCreateKey, nil
+				}
+				if args[0] == "versions" {
+					return dummyVersionsRaw, nil
+				}
+				if args[0] == "osd" && args[1] == "lspools" {
+					// ceph actually outputs this all on one line, but this parses the same
+					return `[
 						{"poolnum":1,"poolname":"replicapool"},
 						{"poolnum":2,"poolname":"device_health_metrics"},
 						{"poolnum":3,"poolname":".rgw.root"},
@@ -439,49 +458,68 @@ func TestCephObjectStoreController(t *testing.T) {
 						{"poolnum":8,"poolname":"my-store.rgw.meta"},
 						{"poolnum":9,"poolname":"my-store.rgw.buckets.data"}
 					]`, nil
-			}
-			return "", nil
-		},
-		MockExecuteCommandWithTimeout: func(timeout time.Duration, command string, args ...string) (string, error) {
-			if args[0] == "realm" && args[1] == "list" {
-				return realmListJSON, nil
-			}
-			if args[0] == "realm" && args[1] == "get" {
-				return realmGetJSON, nil
-			}
-			if args[0] == "zonegroup" && args[1] == "get" {
-				return zoneGroupGetJSON, nil
-			}
-			if args[0] == "zone" && args[1] == "get" {
-				return zoneGetJSON, nil
-			}
-			if args[0] == "user" {
-				return userCreateJSON, nil
-			}
-			return "", nil
-		},
-	}
-	c.Executor = executor
+				}
+				return "", nil
+			},
+			MockExecuteCommandWithTimeout: func(timeout time.Duration, command string, args ...string) (string, error) {
+				if args[0] == "realm" && args[1] == "list" {
+					return realmListJSON, nil
+				}
+				if args[0] == "realm" && args[1] == "get" {
+					return realmGetJSON, nil
+				}
+				if args[0] == "zonegroup" && args[1] == "get" {
+					return zoneGroupGetJSON, nil
+				}
+				if args[0] == "zone" && args[1] == "get" {
+					return zoneGetJSON, nil
+				}
+				if args[0] == "user" {
+					return userCreateJSON, nil
+				}
+				return "", nil
+			},
+		}
+		r.context.Executor = executor
 
-	// Create a ReconcileCephObjectStore object with the scheme and fake client.
-	r = &ReconcileCephObjectStore{
-		client:              cl,
-		scheme:              s,
-		context:             c,
-		objectStoreChannels: make(map[string]*objectStoreHealth),
-		recorder:            k8sutil.NewEventReporter(record.NewFakeRecorder(5)),
+		return r
 	}
 
-	logger.Info("STARTING PHASE 3")
-	res, err = r.Reconcile(ctx, req)
-	assert.NoError(t, err)
-	assert.False(t, res.Requeue)
-	err = r.client.Get(context.TODO(), req.NamespacedName, objectStore)
-	assert.NoError(t, err)
-	assert.Equal(t, cephv1.ConditionProgressing, objectStore.Status.Phase, objectStore)
-	assert.NotEmpty(t, objectStore.Status.Info["endpoint"], objectStore)
-	assert.Equal(t, "http://rook-ceph-rgw-my-store.rook-ceph.svc:80", objectStore.Status.Info["endpoint"], objectStore)
-	logger.Info("PHASE 3 DONE")
+	t.Run("error - failed to start health checker", func(t *testing.T) {
+		r := setupEnvironmentWithReadyCephCluster()
+
+		// cause a failure when creating the admin ops api for the health check
+		origHTTPClientFunc := genObjectStoreHTTPClientFunc
+		genObjectStoreHTTPClientFunc = func(objContext *Context, spec *cephv1.ObjectStoreSpec) (client *http.Client, tlsCert []byte, err error) {
+			return nil, []byte{}, errors.New("induced error creating admin ops API connection")
+		}
+		defer func() { genObjectStoreHTTPClientFunc = origHTTPClientFunc }()
+
+		_, err := r.Reconcile(ctx, req)
+		assert.Error(t, err)
+		// we don't actually care if Requeue is true if there is an error assert.True(t, res.Requeue)
+		assert.Contains(t, err.Error(), "failed to start rgw health checker")
+		assert.Contains(t, err.Error(), "induced error creating admin ops API connection")
+
+		// health checker should start up after committing config changes
+		assert.True(t, calledCommitConfigChanges)
+	})
+
+	t.Run("success - object store is running", func(t *testing.T) {
+		r := setupEnvironmentWithReadyCephCluster()
+
+		res, err := r.Reconcile(ctx, req)
+		assert.NoError(t, err)
+		assert.False(t, res.Requeue)
+
+		objectStore := &cephv1.CephObjectStore{}
+		err = r.client.Get(context.TODO(), req.NamespacedName, objectStore)
+		assert.NoError(t, err)
+		assert.Equal(t, cephv1.ConditionProgressing, objectStore.Status.Phase, objectStore)
+		assert.NotEmpty(t, objectStore.Status.Info["endpoint"], objectStore)
+		assert.Equal(t, "http://rook-ceph-rgw-my-store.rook-ceph.svc:80", objectStore.Status.Info["endpoint"], objectStore)
+		assert.True(t, calledCommitConfigChanges)
+	})
 }
 
 func TestCephObjectStoreControllerMultisite(t *testing.T) {
@@ -617,6 +655,16 @@ func TestCephObjectStoreControllerMultisite(t *testing.T) {
 		},
 	}
 
+	commitConfigChangesOrig := commitConfigChanges
+	defer func() { commitConfigChanges = commitConfigChangesOrig }()
+
+	// make sure joining multisite calls to commit config changes
+	calledCommitConfigChanges := false
+	commitConfigChanges = func(c *Context) error {
+		calledCommitConfigChanges = true
+		return nil
+	}
+
 	clientset := test.New(t, 3)
 	c := &clusterd.Context{
 		Executor:      executor,
@@ -635,8 +683,9 @@ func TestCephObjectStoreControllerMultisite(t *testing.T) {
 		client:              cl,
 		scheme:              s,
 		context:             c,
-		objectStoreChannels: make(map[string]*objectStoreHealth),
+		objectStoreContexts: make(map[string]*objectStoreHealth),
 		recorder:            k8sutil.NewEventReporter(record.NewFakeRecorder(5)),
+		opManagerContext:    ctx,
 	}
 
 	_, err := r.context.Clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
@@ -649,9 +698,50 @@ func TestCephObjectStoreControllerMultisite(t *testing.T) {
 		},
 	}
 
-	res, err := r.Reconcile(ctx, req)
-	assert.NoError(t, err)
-	assert.False(t, res.Requeue)
-	err = r.client.Get(context.TODO(), req.NamespacedName, objectStore)
-	assert.NoError(t, err)
+	currentAndDesiredCephVersion = func(rookImage string, namespace string, jobName string, ownerInfo *k8sutil.OwnerInfo, context *clusterd.Context, cephClusterSpec *cephv1.ClusterSpec, clusterInfo *client.ClusterInfo) (*cephver.CephVersion, *cephver.CephVersion, error) {
+		return &cephver.Pacific, &cephver.Pacific, nil
+	}
+
+	t.Run("create an object store", func(t *testing.T) {
+		res, err := r.Reconcile(ctx, req)
+		assert.NoError(t, err)
+		assert.False(t, res.Requeue)
+		assert.True(t, calledCommitConfigChanges)
+		err = r.client.Get(ctx, req.NamespacedName, objectStore)
+		assert.NoError(t, err)
+	})
+
+	t.Run("delete the same store", func(t *testing.T) {
+		calledCommitConfigChanges = false
+
+		// no dependents
+		dependentsChecked := false
+		cephObjectStoreDependentsOrig := cephObjectStoreDependents
+		defer func() { cephObjectStoreDependents = cephObjectStoreDependentsOrig }()
+		cephObjectStoreDependents = func(clusterdCtx *clusterd.Context, clusterInfo *client.ClusterInfo, store *cephv1.CephObjectStore, objCtx *Context, opsCtx *AdminOpsContext) (*dependents.DependentList, error) {
+			dependentsChecked = true
+			return &dependents.DependentList{}, nil
+		}
+
+		err = r.client.Get(ctx, req.NamespacedName, objectStore)
+		assert.NoError(t, err)
+		objectStore.DeletionTimestamp = &metav1.Time{
+			Time: time.Now(),
+		}
+		err = r.client.Update(ctx, objectStore)
+
+		// have to also track the same objects in the rook clientset
+		r.context.RookClientset = rookfake.NewSimpleClientset(
+			objectRealm,
+			objectZoneGroup,
+			objectZone,
+			objectStore,
+		)
+
+		res, err := r.Reconcile(ctx, req)
+		assert.NoError(t, err)
+		assert.False(t, res.Requeue)
+		assert.True(t, dependentsChecked)
+		assert.True(t, calledCommitConfigChanges)
+	})
 }

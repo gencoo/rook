@@ -19,7 +19,6 @@ package mirror
 import (
 	"fmt"
 
-	"github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/config/keyring"
 	"github.com/rook/rook/pkg/operator/ceph/version"
@@ -41,8 +40,7 @@ const (
 
 var (
 	// PeerAdditionMinVersion This version includes a number of fixes for snapshots and mirror status
-	// TODO change me to 16.2.5
-	PeerAdditionMinVersion = version.CephVersion{Major: 16, Minor: 2, Extra: 2}
+	PeerAdditionMinVersion = version.CephVersion{Major: 16, Minor: 2, Extra: 5}
 )
 
 // daemonConfig for a single rbd-mirror
@@ -52,14 +50,14 @@ type daemonConfig struct {
 	ownerInfo    *k8sutil.OwnerInfo
 }
 
-func (r *ReconcileFilesystemMirror) generateKeyring(clusterInfo *client.ClusterInfo, daemonConfig *daemonConfig) (string, error) {
+func (r *ReconcileFilesystemMirror) generateKeyring(daemonConfig *daemonConfig) (string, error) {
 	access := []string{
 		"mon", "allow profile cephfs-mirror",
 		"mgr", "allow r",
 		"mds", "allow r",
 		"osd", "allow rw tag cephfs metadata=*, allow r tag cephfs data=*",
 	}
-	s := keyring.GetSecretStore(r.context, clusterInfo, daemonConfig.ownerInfo)
+	s := keyring.GetSecretStore(r.context, r.clusterInfo, daemonConfig.ownerInfo)
 
 	key, err := s.GenerateKey(user, access)
 	if err != nil {

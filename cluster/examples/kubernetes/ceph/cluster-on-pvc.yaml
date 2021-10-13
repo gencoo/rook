@@ -14,7 +14,8 @@ metadata:
 spec:
   dataDirHostPath: /var/lib/rook
   mon:
-    # Set the number of mons to be started. Must be an odd number, and is generally recommended to be 3.
+    # Set the number of mons to be started. Generally recommended to be 3.
+    # For highest availability, an odd number of mons should be specified.
     count: 3
     # The mons should be on unique nodes. For production, at least 3 nodes are recommended for this reason.
     # Mons should only be allowed on the same node for test environments where data loss is acceptable.
@@ -32,7 +33,7 @@ spec:
           requests:
             storage: 10Gi
   cephVersion:
-    image: quay.io/ceph/ceph:v16.2.5
+    image: quay.io/ceph/ceph:v16.2.6
     allowUnsupported: false
   skipUpgradeChecks: false
   continueUpgradeAfterChecksEvenIfNotHealthy: false
@@ -158,6 +159,8 @@ spec:
         #       - ReadWriteOnce
         # Scheduler name for OSD pod placement
         # schedulerName: osd-scheduler
+    # when onlyApplyOSDPlacement is false, will merge both placement.All() and storageClassDeviceSets.Placement.
+    onlyApplyOSDPlacement: false
   resources:
   #  prepareosd:
   #    limits:

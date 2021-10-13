@@ -19,8 +19,8 @@ package v1
 import (
 	"time"
 
-	rook "github.com/rook/rook/pkg/apis/rook.io"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -61,7 +61,7 @@ type CephClusterHealthCheckSpec struct {
 	DaemonHealth DaemonHealthSpec `json:"daemonHealth,omitempty"`
 	// LivenessProbe allows to change the livenessprobe configuration for a given daemon
 	// +optional
-	LivenessProbe map[rook.KeyType]*ProbeSpec `json:"livenessProbe,omitempty"`
+	LivenessProbe map[KeyType]*ProbeSpec `json:"livenessProbe,omitempty"`
 }
 
 // DaemonHealthSpec is a daemon health check
@@ -467,6 +467,7 @@ const (
 type MonSpec struct {
 	// Count is the number of Ceph monitors
 	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=9
 	// +optional
 	Count int `json:"count,omitempty"`
 	// AllowMultiplePerNode determines if we can run multiple monitors on the same node (not recommended)
@@ -1008,13 +1009,13 @@ type MetadataServerSpec struct {
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +nullable
 	// +optional
-	Annotations rook.Annotations `json:"annotations,omitempty"`
+	Annotations Annotations `json:"annotations,omitempty"`
 
 	// The labels-related configuration to add/set on each Pod related object.
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +nullable
 	// +optional
-	Labels rook.Labels `json:"labels,omitempty"`
+	Labels Labels `json:"labels,omitempty"`
 
 	// The resource requirements for the rgw pods
 	// +kubebuilder:pruning:PreserveUnknownFields
@@ -1319,6 +1320,11 @@ type GatewaySpec struct {
 	// +optional
 	SSLCertificateRef string `json:"sslCertificateRef,omitempty"`
 
+	// The name of the secret that stores custom ca-bundle with root and intermediate certificates.
+	// +nullable
+	// +optional
+	CaBundleRef string `json:"caBundleRef,omitempty"`
+
 	// The affinity to place the rgw pods (default is to place on any available node)
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +nullable
@@ -1329,13 +1335,13 @@ type GatewaySpec struct {
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +nullable
 	// +optional
-	Annotations rook.Annotations `json:"annotations,omitempty"`
+	Annotations Annotations `json:"annotations,omitempty"`
 
 	// The labels-related configuration to add/set on each Pod related object.
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +nullable
 	// +optional
-	Labels rook.Labels `json:"labels,omitempty"`
+	Labels Labels `json:"labels,omitempty"`
 
 	// The resource requirements for the rgw pods
 	// +kubebuilder:pruning:PreserveUnknownFields
@@ -1425,12 +1431,59 @@ type CephObjectStoreUserList struct {
 
 // ObjectStoreUserSpec represent the spec of an Objectstoreuser
 type ObjectStoreUserSpec struct {
-	//The store the user will be created in
+	// The store the user will be created in
 	// +optional
 	Store string `json:"store,omitempty"`
-	//The display name for the ceph users
+	// The display name for the ceph users
 	// +optional
 	DisplayName string `json:"displayName,omitempty"`
+	// +optional
+	// +nullable
+	Capabilities *ObjectUserCapSpec `json:"capabilities,omitempty"`
+	// +optional
+	// +nullable
+	Quotas *ObjectUserQuotaSpec `json:"quotas,omitempty"`
+}
+
+// Additional admin-level capabilities for the Ceph object store user
+type ObjectUserCapSpec struct {
+	// +optional
+	// +kubebuilder:validation:Enum={"*","read","write","read, write"}
+	// Admin capabilities to read/write Ceph object store users. Documented in https://docs.ceph.com/en/latest/radosgw/admin/?#add-remove-admin-capabilities
+	User string `json:"user,omitempty"`
+	// +optional
+	// +kubebuilder:validation:Enum={"*","read","write","read, write"}
+	// Admin capabilities to read/write Ceph object store buckets. Documented in https://docs.ceph.com/en/latest/radosgw/admin/?#add-remove-admin-capabilities
+	Bucket string `json:"bucket,omitempty"`
+	// +optional
+	// +kubebuilder:validation:Enum={"*","read","write","read, write"}
+	// Admin capabilities to read/write Ceph object store metadata. Documented in https://docs.ceph.com/en/latest/radosgw/admin/?#add-remove-admin-capabilities
+	MetaData string `json:"metadata,omitempty"`
+	// +optional
+	// +kubebuilder:validation:Enum={"*","read","write","read, write"}
+	// Admin capabilities to read/write Ceph object store usage. Documented in https://docs.ceph.com/en/latest/radosgw/admin/?#add-remove-admin-capabilities
+	Usage string `json:"usage,omitempty"`
+	// +optional
+	// +kubebuilder:validation:Enum={"*","read","write","read, write"}
+	// Admin capabilities to read/write Ceph object store zones. Documented in https://docs.ceph.com/en/latest/radosgw/admin/?#add-remove-admin-capabilities
+	Zone string `json:"zone,omitempty"`
+}
+
+// ObjectUserQuotaSpec can be used to set quotas for the object store user to limit their usage. See the [Ceph docs](https://docs.ceph.com/en/latest/radosgw/admin/?#quota-management) for more
+type ObjectUserQuotaSpec struct {
+	// Maximum bucket limit for the ceph user
+	// +optional
+	// +nullable
+	MaxBuckets *int `json:"maxBuckets,omitempty"`
+	// Maximum size limit of all objects across all the user's buckets
+	// See https://pkg.go.dev/k8s.io/apimachinery/pkg/api/resource#Quantity for more info.
+	// +optional
+	// +nullable
+	MaxSize *resource.Quantity `json:"maxSize,omitempty"`
+	// Maximum number of objects across all the user's buckets
+	// +optional
+	// +nullable
+	MaxObjects *int64 `json:"maxObjects,omitempty"`
 }
 
 // CephObjectRealm represents a Ceph Object Store Gateway Realm
@@ -1464,6 +1517,7 @@ type ObjectRealmSpec struct {
 
 // PullSpec represents the pulling specification of a Ceph Object Storage Gateway Realm
 type PullSpec struct {
+	// +kubebuilder:validation:Pattern=`^https*://`
 	Endpoint string `json:"endpoint"`
 }
 
@@ -1536,7 +1590,7 @@ type RGWServiceSpec struct {
 	// The annotations-related configuration to add/set on each rgw service.
 	// nullable
 	// optional
-	Annotations rook.Annotations `json:"annotations,omitempty"`
+	Annotations Annotations `json:"annotations,omitempty"`
 }
 
 // CephNFS represents a Ceph NFS
@@ -1565,7 +1619,9 @@ type CephNFSList struct {
 // NFSGaneshaSpec represents the spec of an nfs ganesha server
 type NFSGaneshaSpec struct {
 	// RADOS is the Ganesha RADOS specification
-	RADOS GaneshaRADOSSpec `json:"rados"`
+	// +nullable
+	// +optional
+	RADOS GaneshaRADOSSpec `json:"rados,omitempty"`
 
 	// Server is the Ganesha Server specification
 	Server GaneshaServerSpec `json:"server"`
@@ -1595,13 +1651,13 @@ type GaneshaServerSpec struct {
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +nullable
 	// +optional
-	Annotations rook.Annotations `json:"annotations,omitempty"`
+	Annotations Annotations `json:"annotations,omitempty"`
 
 	// The labels-related configuration to add/set on each Pod related object.
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +nullable
 	// +optional
-	Labels rook.Labels `json:"labels,omitempty"`
+	Labels Labels `json:"labels,omitempty"`
 
 	// Resources set resource requests and limits
 	// +kubebuilder:pruning:PreserveUnknownFields
@@ -1638,7 +1694,6 @@ type NetworkSpec struct {
 
 	// IPFamily is the single stack IPv6 or IPv4 protocol
 	// +kubebuilder:validation:Enum=IPv4;IPv6
-	// +kubebuilder:default=IPv4
 	// +nullable
 	// +optional
 	IPFamily IPFamilyType `json:"ipFamily,omitempty"`
@@ -1803,13 +1858,13 @@ type RBDMirroringSpec struct {
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +nullable
 	// +optional
-	Annotations rook.Annotations `json:"annotations,omitempty"`
+	Annotations Annotations `json:"annotations,omitempty"`
 
 	// The labels-related configuration to add/set on each Pod related object.
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +nullable
 	// +optional
-	Labels rook.Labels `json:"labels,omitempty"`
+	Labels Labels `json:"labels,omitempty"`
 
 	// The resource requirements for the rbd mirror pods
 	// +kubebuilder:pruning:PreserveUnknownFields
@@ -1862,12 +1917,12 @@ type FilesystemMirroringSpec struct {
 	// The annotations-related configuration to add/set on each Pod related object.
 	// +nullable
 	// +optional
-	Annotations rook.Annotations `json:"annotations,omitempty"`
+	Annotations Annotations `json:"annotations,omitempty"`
 
 	// The labels-related configuration to add/set on each Pod related object.
 	// +nullable
 	// +optional
-	Labels rook.Labels `json:"labels,omitempty"`
+	Labels Labels `json:"labels,omitempty"`
 
 	// The resource requirements for the cephfs-mirror pods
 	// +nullable
@@ -1895,6 +1950,8 @@ type StorageScopeSpec struct {
 	Nodes []Node `json:"nodes,omitempty"`
 	// +optional
 	UseAllNodes bool `json:"useAllNodes,omitempty"`
+	// +optional
+	OnlyApplyOSDPlacement bool `json:"onlyApplyOSDPlacement,omitempty"`
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +nullable
 	// +optional
@@ -1928,6 +1985,7 @@ type Device struct {
 	// +optional
 	FullPath string `json:"fullpath,omitempty"`
 	// +kubebuilder:pruning:PreserveUnknownFields
+	// +nullable
 	// +optional
 	Config map[string]string `json:"config,omitempty"`
 }
@@ -1953,7 +2011,7 @@ type Selection struct {
 }
 
 // PlacementSpec is the placement for core ceph daemons part of the CephCluster CRD
-type PlacementSpec map[rook.KeyType]Placement
+type PlacementSpec map[KeyType]Placement
 
 // Placement is the placement for an object
 type Placement struct {
@@ -1990,7 +2048,7 @@ type ProbeSpec struct {
 }
 
 // PriorityClassNamesSpec is a map of priority class names to be assigned to components
-type PriorityClassNamesSpec map[rook.KeyType]string
+type PriorityClassNamesSpec map[KeyType]string
 
 // StorageClassDeviceSet is a storage class device set
 // +nullable

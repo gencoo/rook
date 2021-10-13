@@ -20,7 +20,6 @@ package mds
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -58,7 +57,6 @@ type Cluster struct {
 	context         *clusterd.Context
 	clusterSpec     *cephv1.ClusterSpec
 	fs              cephv1.CephFilesystem
-	fsID            string
 	ownerInfo       *k8sutil.OwnerInfo
 	dataDirHostPath string
 }
@@ -75,7 +73,6 @@ func NewCluster(
 	context *clusterd.Context,
 	clusterSpec *cephv1.ClusterSpec,
 	fs cephv1.CephFilesystem,
-	fsdetails *cephclient.CephFilesystemDetails,
 	ownerInfo *k8sutil.OwnerInfo,
 	dataDirHostPath string,
 ) *Cluster {
@@ -84,7 +81,6 @@ func NewCluster(
 		context:         context,
 		clusterSpec:     clusterSpec,
 		fs:              fs,
-		fsID:            strconv.Itoa(fsdetails.ID),
 		ownerInfo:       ownerInfo,
 		dataDirHostPath: dataDirHostPath,
 	}
@@ -95,7 +91,6 @@ var UpdateDeploymentAndWait = mon.UpdateCephDeploymentAndWait
 
 // Start starts or updates a Ceph mds cluster in Kubernetes.
 func (c *Cluster) Start() error {
-	ctx := context.TODO()
 	// Validate pod's memory if specified
 	err := controller.CheckPodMemory(cephv1.ResourcesKeyMDS, c.fs.Spec.MetadataServer.Resources, cephMdsPodMinimumMemory)
 	if err != nil {
@@ -135,7 +130,7 @@ func (c *Cluster) Start() error {
 	desiredDeployments := map[string]bool{} // improvised set
 	// Create/update deployments
 	for i := 0; i < int(replicas); i++ {
-		deployment, err := c.startDeployment(ctx, k8sutil.IndexToName(i))
+		deployment, err := c.startDeployment(c.clusterInfo.Context, k8sutil.IndexToName(i))
 		if err != nil {
 			return errors.Wrapf(err, "failed to start deployment for MDS %q for filesystem %q", k8sutil.IndexToName(i), c.fs.Name)
 		}
@@ -233,7 +228,7 @@ func (c *Cluster) isCephUpgrade() (bool, error) {
 			return false, err
 		}
 		if cephver.IsSuperior(c.clusterInfo.CephVersion, *currentVersion) {
-			logger.Debugf("ceph version for MDS %q is %q and target version is %q", key, currentVersion, c.clusterInfo.CephVersion)
+			logger.Debugf("ceph version for MDS %q is %q and target version is %q", key, currentVersion.String(), c.clusterInfo.CephVersion.String())
 			return true, err
 		}
 	}
@@ -250,7 +245,8 @@ func (c *Cluster) upgradeMDS() error {
 		return errors.Wrap(err, "failed to setting allow_standby_replay to false")
 	}
 
-	// In Pacific, standby-replay daemons are stopped automatically. Older versions of Ceph require us to stop these daemons manually.
+	// In Pacific, standby-replay daemons are stopped automatically. Older versions of Ceph require
+	// us to stop these daemons manually.
 	if err := cephclient.FailAllStandbyReplayMDS(c.context, c.clusterInfo, c.fs.Name); err != nil {
 		return errors.Wrap(err, "failed to fail mds agent in up:standby-replay state")
 	}
@@ -287,7 +283,7 @@ func (c *Cluster) upgradeMDS() error {
 	}
 
 	// 5. upgrade current active deployment and wait for it come back
-	_, err = c.startDeployment(context.TODO(), daemonLetterID)
+	_, err = c.startDeployment(c.clusterInfo.Context, daemonLetterID)
 	if err != nil {
 		return errors.Wrapf(err, "failed to upgrade mds %q", daemonName)
 	}

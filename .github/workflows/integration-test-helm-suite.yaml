@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        kubernetes-versions : ['v1.15.12', 'v1.21.0']
+        kubernetes-versions : ['v1.16.15', 'v1.22.2']
     steps:
     - name: checkout
       uses: actions/checkout@v2
@@ -54,7 +54,7 @@ jobs:
        tests/scripts/minikube.sh helm
        tests/scripts/helm.sh up
        export DEVICE_FILTER=$(lsblk|awk '/14G/ {print $1}'| head -1)
-       SKIP_TEST_CLEANUP=false SKIP_CLEANUP_POLICY=false go test -v -timeout 1800s -run CephHelmSuite github.com/rook/rook/tests/integration
+       SKIP_TEST_CLEANUP=false SKIP_CLEANUP_POLICY=false go test -v -timeout 1800s -failfast -run CephHelmSuite github.com/rook/rook/tests/integration
 
     - name: Artifact
       uses: actions/upload-artifact@v2
@@ -63,7 +63,7 @@ jobs:
         name: ceph-helm-suite-artifact
         path: /home/runner/work/rook/rook/tests/integration/_output/tests/
 
-    - name: setup tmate session for debugging
-      if: failure()
+    - name: setup tmate session for debugging when event is PR
+      if: failure() && github.event_name == 'pull_request'
       uses: mxschmitt/action-tmate@v3
-      timeout-minutes: 120
+      timeout-minutes: 60

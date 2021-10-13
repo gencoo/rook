@@ -26,7 +26,8 @@ spec:
   accessModes:
     - ReadWriteOnce
   persistentVolumeReclaimPolicy: Retain
-  volumeMode: Block
+  # PV for mon must be a filesystem volume.
+  volumeMode: Filesystem
   local:
     # If you want to use dm devices like logical volume, please replace `/dev/sdb` with their device names like `/dev/vg-name/lv-name`.
     path: /dev/sdb
@@ -50,6 +51,7 @@ spec:
   accessModes:
     - ReadWriteOnce
   persistentVolumeReclaimPolicy: Retain
+  # PV for OSD must be a block volume.
   volumeMode: Block
   local:
     path: /dev/sdc
@@ -73,7 +75,7 @@ spec:
   accessModes:
     - ReadWriteOnce
   persistentVolumeReclaimPolicy: Retain
-  volumeMode: Block
+  volumeMode: Filesystem
   local:
     path: /dev/sdb
   nodeAffinity:
@@ -119,7 +121,7 @@ spec:
   accessModes:
     - ReadWriteOnce
   persistentVolumeReclaimPolicy: Retain
-  volumeMode: Block
+  volumeMode: Filesystem
   local:
     path: /dev/sdb
   nodeAffinity:
@@ -171,7 +173,7 @@ spec:
           requests:
             storage: 10Gi
   cephVersion:
-    image: quay.io/ceph/ceph:v16.2.5
+    image: quay.io/ceph/ceph:v16.2.6
     allowUnsupported: false
   skipUpgradeChecks: false
   continueUpgradeAfterChecksEvenIfNotHealthy: false
@@ -193,6 +195,18 @@ spec:
         tuneDeviceClass: true
         tuneFastDeviceClass: false
         encrypted: false
+        placement:
+          topologySpreadConstraints:
+            - maxSkew: 1
+              topologyKey: kubernetes.io/hostname
+              whenUnsatisfiable: ScheduleAnyway
+              labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - rook-ceph-osd
+                      - rook-ceph-osd-prepare
         preparePlacement:
           podAntiAffinity:
             preferredDuringSchedulingIgnoredDuringExecution:
@@ -208,6 +222,7 @@ spec:
                         operator: In
                         values:
                           - rook-ceph-osd-prepare
+                  topologyKey: kubernetes.io/hostname
         resources:
         # These are the OSD daemon limits. For OSD prepare limits, see the separate section below for "prepareosd" resources
         #   limits:
@@ -231,6 +246,8 @@ spec:
               volumeMode: Block
               accessModes:
                 - ReadWriteOnce
+    # when onlyApplyOSDPlacement is false, will merge both placement.All() and storageClassDeviceSets.Placement
+    onlyApplyOSDPlacement: false
   resources:
   #  prepareosd:
   #    limits:

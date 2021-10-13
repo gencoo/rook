@@ -18,7 +18,6 @@ package installer
 
 import (
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -43,7 +42,7 @@ type CephManifests interface {
 	GetNFS(name, pool string, daemonCount int) string
 	GetRBDMirror(name string, daemonCount int) string
 	GetObjectStore(name string, replicaCount, port int, tlsEnable bool) string
-	GetObjectStoreUser(name, displayName, store string) string
+	GetObjectStoreUser(name, displayName, store, usercaps, maxsize string, maxbuckets, maxobjects int) string
 	GetBucketStorageClass(storeName, storageClassName, reclaimPolicy, region string) string
 	GetOBC(obcName, storageClassName, bucketName string, maxObject string, createBucket bool) string
 	GetClient(name string, caps map[string]string) string
@@ -57,7 +56,7 @@ type CephManifestsMaster struct {
 // NewCephManifests gets the manifest type depending on the Rook version desired
 func NewCephManifests(settings *TestCephSettings) CephManifests {
 	switch settings.RookVersion {
-	case VersionMaster:
+	case LocalBuildTag:
 		return &CephManifestsMaster{settings}
 	case Version1_6:
 		return &CephManifestsV1_6{settings}
@@ -70,10 +69,7 @@ func (m *CephManifestsMaster) Settings() *TestCephSettings {
 }
 
 func (m *CephManifestsMaster) GetCRDs(k8shelper *utils.K8sHelper) string {
-	if k8shelper.VersionAtLeast("v1.16.0") {
-		return m.settings.readManifest("crds.yaml")
-	}
-	return m.settings.readManifest("pre-k8s-1.16/crds.yaml")
+	return m.settings.readManifest("crds.yaml")
 }
 
 func (m *CephManifestsMaster) GetOperator() string {
@@ -83,11 +79,7 @@ func (m *CephManifestsMaster) GetOperator() string {
 	} else {
 		manifest = m.settings.readManifest("operator.yaml")
 	}
-	manifest = m.settings.replaceOperatorSettings(manifest)
-
-	// In release branches replace the tag with a master build since the local build has the master tag
-	r, _ := regexp.Compile(`image: rook/ceph:v[a-z0-9.-]+`)
-	return r.ReplaceAllString(manifest, "image: rook/ceph:master")
+	return m.settings.replaceOperatorSettings(manifest)
 }
 
 func (m *CephManifestsMaster) GetCommonExternal() string {
@@ -295,8 +287,7 @@ spec:
 
 func (m *CephManifestsMaster) GetBlockStorageClass(poolName, storageClassName, reclaimPolicy string) string {
 	// Create a CSI driver storage class
-	if m.settings.UseCSI {
-		return `
+	return `
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
@@ -313,18 +304,6 @@ parameters:
   imageFeatures: layering
   csi.storage.k8s.io/fstype: ext4
 `
-	}
-	// Create a FLEX driver storage class
-	return `apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-   name: ` + storageClassName + `
-provisioner: ceph.rook.io/block
-allowVolumeExpansion: true
-reclaimPolicy: ` + reclaimPolicy + `
-parameters:
-    blockPool: ` + poolName + `
-    clusterNamespace: ` + m.settings.Namespace
 }
 
 func (m *CephManifestsMaster) GetFileStorageClass(fsName, storageClassName string) string {
@@ -434,11 +413,11 @@ spec:
   healthCheck:
     bucket:
       disabled: false
-      interval: 10s
+      interval: 5s
 `
 }
 
-func (m *CephManifestsMaster) GetObjectStoreUser(name string, displayName string, store string) string {
+func (m *CephManifestsMaster) GetObjectStoreUser(name, displayName, store, usercaps, maxsize string, maxbuckets, maxobjects int) string {
 	return `apiVersion: ceph.rook.io/v1
 kind: CephObjectStoreUser
 metadata:
@@ -446,7 +425,13 @@ metadata:
   namespace: ` + m.settings.Namespace + `
 spec:
   displayName: ` + displayName + `
-  store: ` + store
+  store: ` + store + `
+  quotas:
+    maxBuckets: ` + strconv.Itoa(maxbuckets) + `
+    maxObjects: ` + strconv.Itoa(maxobjects) + `
+    maxSize: ` + maxsize + `
+  capabilities:
+    user: ` + usercaps
 }
 
 //GetBucketStorageClass returns the manifest to create object bucket
